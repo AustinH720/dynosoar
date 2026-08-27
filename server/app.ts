@@ -1,7 +1,7 @@
 import express, { Response, NextFunction } from "express";
 import type { Request } from "express";
 import { createServer } from "node:http";
-import { registerRoutes } from "./routes";
+import { registerRoutes } from "./routes.js";
 
 // Shared Express app factory, used by both the long-running sandbox server
 // (server/index.ts, which calls app.listen()) and the Vercel serverless

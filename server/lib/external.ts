@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { getCalendarClient } from "./google-auth";
+import { getCalendarClient } from "./google-auth.js";
 
 // Two auth paths, same rationale as sheets.ts: service account (production)
 // when GOOGLE_SERVICE_ACCOUNT_KEY is set, gws/external-tool CLI (this sandbox

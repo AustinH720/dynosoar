@@ -1,10 +1,10 @@
 import type { Express } from "express";
 import type { Server } from "node:http";
-import { getValues, appendRow, updateRow, TABS, getSettings, updateSettings } from "./lib/sheets";
-import { createCalendarEvent } from "./lib/external";
-import { classify, extractProject } from "./lib/classify";
-import { toIsoWithTz, todayStr, nowInAppTz } from "./lib/time";
-import { findRecentDuplicate } from "./lib/dedupe";
+import { getValues, appendRow, updateRow, TABS, getSettings, updateSettings } from "./lib/sheets.js";
+import { createCalendarEvent } from "./lib/external.js";
+import { classify, extractProject } from "./lib/classify.js";
+import { toIsoWithTz, todayStr, nowInAppTz } from "./lib/time.js";
+import { findRecentDuplicate } from "./lib/dedupe.js";
 import {
   awardXp,
   getPlayerState,
@@ -15,7 +15,7 @@ import {
   getShopItems,
   purchaseShopItem,
   type OpenTask,
-} from "./lib/gamification";
+} from "./lib/gamification.js";
 
 function rowsToObjects(values: string[][], startRow: number) {
   return values.map((row, i) => ({ row: startRow + i, cells: row }));

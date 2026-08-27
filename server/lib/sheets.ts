@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { getSheetsClient } from "./google-auth";
+import { getSheetsClient } from "./google-auth.js";
 
 const SPREADSHEET_ID = "18VEXw4UYNqPza7jGoUzgRDGBxHtxlHtZqf-YjpwLErY";
 

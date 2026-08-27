@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { createServer } from "node:http";
-import { getApp } from "./app";
-import { serveStatic } from "./static";
+import { getApp } from "./app.js";
+import { serveStatic } from "./static.js";
 
 declare module "http" {
   interface IncomingMessage {

@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getApp } from "../server/app";
+import { getApp } from "../server/app.js";
 
 // Vercel serverless entry point. Vercel's Node runtime invokes this default
 // export as a plain (req, res) handler for every request under /api/*  —

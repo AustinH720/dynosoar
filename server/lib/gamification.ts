@@ -1,4 +1,4 @@
-import { getValues, updateRow, appendRow, TABS } from "./sheets";
+import { getValues, updateRow, appendRow, TABS } from "./sheets.js";
 
 // ---------- XP rules ----------
 // Simplified from the Life RPG blueprint (SDT-aligned): reward showing up,

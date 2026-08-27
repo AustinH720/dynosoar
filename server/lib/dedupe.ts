@@ -1,4 +1,4 @@
-import { getValues, TABS } from "./sheets";
+import { getValues, TABS } from "./sheets.js";
 
 function normalize(text: string): string {
   return text
