@@ -1,4 +1,4 @@
-import { getValues, updateRow, appendRow, TABS } from "./sheets.js";
+import { getValues, updateRow, appendRow, clearRange, TABS, normalizeTime } from "./sheets.js";
 
 // ---------- XP rules ----------
 // Simplified from the Life RPG blueprint (SDT-aligned): reward showing up,
@@ -353,6 +353,59 @@ export async function purchaseShopItem(row: number): Promise<{ ok: boolean; mess
 }
 
 // ---------- Recurring routine checklist ----------
+export const DAY_CODES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const DAY_INDEX: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
+
+/**
+ * Parses a routine's free-text/canonical "days" field into the set of weekday
+ * indices (0=Sun..6=Sat) it runs on. Understands both the structured
+ * "Mon,Wed,Fri" form written by the Routine tab and legacy free-text labels
+ * ("Daily", "Weekdays", "Weekends", "Weekly (Wed)") from earlier capture flows.
+ * Falls back to "every day" when nothing recognizable is found, so an
+ * ambiguous legacy row is never silently hidden from the checklist.
+ */
+export function parseDaysToSet(days: string): Set<number> {
+  const norm = (days || "").toLowerCase();
+  if (!norm.trim()) return new Set([0, 1, 2, 3, 4, 5, 6]);
+  if (/\bdaily\b|\bevery ?day\b/.test(norm)) return new Set([0, 1, 2, 3, 4, 5, 6]);
+  if (/\bweekday/.test(norm)) return new Set([1, 2, 3, 4, 5]);
+  if (/\bweekend/.test(norm)) return new Set([0, 6]);
+
+  // Legacy free-text range form, e.g. "Mon-Fri", "Mon\u2013Fri", "Tue to Thu".
+  // Expand it to every weekday in the inclusive range instead of only the
+  // two endpoints so mid-range days aren't silently dropped from "today".
+  const rangeMatch = norm.match(/\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\s*(?:-|\u2013|\u2014|to)\s*(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/);
+  if (rangeMatch) {
+    const start = DAY_INDEX[rangeMatch[1]];
+    const end = DAY_INDEX[rangeMatch[2]];
+    if (start != null && end != null) {
+      const set = new Set<number>();
+      let i = start;
+      while (true) {
+        set.add(i);
+        if (i === end) break;
+        i = (i + 1) % 7;
+      }
+      return set;
+    }
+  }
+
+  const set = new Set<number>();
+  for (const [key, idx] of Object.entries(DAY_INDEX)) {
+    if (new RegExp(`\\b${key}`).test(norm)) set.add(idx);
+  }
+  return set.size > 0 ? set : new Set([0, 1, 2, 3, 4, 5, 6]);
+}
+
+/** Builds a canonical, storage-friendly days string from selected weekday indices. */
+export function daysSetToLabel(indices: number[]): string {
+  const sorted = Array.from(new Set(indices)).sort();
+  if (sorted.length === 7) return "Daily";
+  if (sorted.length === 5 && [1, 2, 3, 4, 5].every((d) => sorted.includes(d))) return "Weekdays";
+  if (sorted.length === 2 && [0, 6].every((d) => sorted.includes(d))) return "Weekends";
+  return sorted.map((i) => DAY_CODES[i]).join(",");
+}
+
 export interface RoutineItem {
   row: number;
   timeBlock: string;
@@ -363,16 +416,17 @@ export interface RoutineItem {
   notes: string;
   lastCompleted: string;
   doneToday: boolean;
+  scheduledToday: boolean;
 }
 
-export async function getRoutineItems(todayStr: string): Promise<RoutineItem[]> {
+export async function getRoutineItems(todayStr: string, weekday: number): Promise<RoutineItem[]> {
   const values = await getValues(TABS.ROUTINE, "A2:G200");
   return values
     .map((row, i) => ({ row: i + 2, cells: row }))
     .filter((r) => r.cells[1])
     .map((r) => ({
       row: r.row,
-      timeBlock: r.cells[0] ?? "",
+      timeBlock: normalizeTime(r.cells[0]),
       activity: r.cells[1] ?? "",
       days: r.cells[2] ?? "",
       type: r.cells[3] ?? "",
@@ -380,7 +434,46 @@ export async function getRoutineItems(todayStr: string): Promise<RoutineItem[]> 
       notes: r.cells[5] ?? "",
       lastCompleted: r.cells[6] ?? "",
       doneToday: (r.cells[6] ?? "") === todayStr,
+      scheduledToday: parseDaysToSet(r.cells[2] ?? "").has(weekday),
     }));
+}
+
+export async function createRoutineItem(data: {
+  timeBlock: string;
+  activity: string;
+  days: string;
+  category?: string;
+  notes?: string;
+}): Promise<void> {
+  await appendRow(TABS.ROUTINE, [
+    data.timeBlock ?? "",
+    data.activity,
+    data.days,
+    data.category ?? "General",
+    "No",
+    data.notes ?? "",
+    "",
+  ]);
+}
+
+export async function updateRoutineItem(
+  row: number,
+  data: { timeBlock?: string; activity?: string; days?: string; category?: string; notes?: string },
+): Promise<void> {
+  const existing = await getValues(TABS.ROUTINE, `A${row}:G${row}`);
+  const prev = existing[0] ?? [];
+  const timeBlock = data.timeBlock ?? prev[0] ?? "";
+  const activity = data.activity ?? prev[1] ?? "";
+  const days = data.days ?? prev[2] ?? "";
+  const category = data.category ?? prev[3] ?? "General";
+  const autoAdd = prev[4] ?? "No";
+  const notes = data.notes ?? prev[5] ?? "";
+  const lastCompleted = prev[6] ?? "";
+  await updateRow(TABS.ROUTINE, `A${row}:G${row}`, [timeBlock, activity, days, category, autoAdd, notes, lastCompleted]);
+}
+
+export async function deleteRoutineItem(row: number): Promise<void> {
+  await clearRange(TABS.ROUTINE, `A${row}:G${row}`);
 }
 
 export interface RoutineToggleResult {
@@ -456,4 +549,43 @@ const COMPLETION_PATTERN =
 
 export function isCompletionPhrase(text: string): boolean {
   return COMPLETION_PATTERN.test(text.trim());
+}
+
+// ---------- Fuzzy match free text against upcoming events, for cancellation ----------
+const CANCEL_LEAD = /^(i\s+(want|need)\s+to\s+|please\s+|can\s+you\s+)?(cancel|remove|delete)\b/i;
+
+export function isCancellationPhrase(text: string): boolean {
+  return CANCEL_LEAD.test(text.trim());
+}
+
+export interface OpenEvent {
+  row: number;
+  title: string;
+  date: string;
+  eventId: string;
+}
+
+/** Returns the best-matching upcoming event above a similarity threshold, or null. */
+export function findBestEventMatch(text: string, events: OpenEvent[]): OpenEvent | null {
+  // Strip the leading cancellation verb phrase so "cancel my call mortgage
+  // broker renewal" matches against "call mortgage broker renewal", not
+  // diluted by "cancel"/"remove"/"delete" tokens that never appear in titles.
+  const stripped = text.replace(CANCEL_LEAD, "");
+  const inputTokens = tokenize(stripped);
+  if (inputTokens.size === 0) return null;
+
+  let best: OpenEvent | null = null;
+  let bestScore = 0;
+  for (const e of events) {
+    const titleTokens = tokenize(e.title);
+    if (titleTokens.size === 0) continue;
+    let overlap = 0;
+    for (const w of titleTokens) if (inputTokens.has(w)) overlap += 1;
+    const score = overlap / Math.min(inputTokens.size, titleTokens.size);
+    if (score > bestScore) {
+      bestScore = score;
+      best = e;
+    }
+  }
+  return bestScore >= 0.5 ? best : null;
 }

@@ -124,3 +124,73 @@ export async function createCalendarEvent(opts: {
     ? createCalendarEventServiceAccount(opts)
     : createCalendarEventGws(opts);
 }
+
+export interface UpdateCalendarOpts {
+  eventId: string;
+  title?: string | null;
+  description?: string | null;
+  start_date_time?: string | null;
+  end_date_time?: string | null;
+  location?: string | null;
+}
+
+async function updateCalendarEventServiceAccount(opts: UpdateCalendarOpts): Promise<void> {
+  const calendar = getCalendarClient();
+  const requestBody: Record<string, any> = {};
+  if (opts.title != null) requestBody.summary = opts.title;
+  if (opts.description != null) requestBody.description = opts.description;
+  if (opts.location != null) requestBody.location = opts.location;
+  if (opts.start_date_time != null) requestBody.start = { dateTime: opts.start_date_time };
+  if (opts.end_date_time != null) requestBody.end = { dateTime: opts.end_date_time };
+  await calendar.events.patch({
+    calendarId: CALENDAR_ID,
+    eventId: opts.eventId,
+    requestBody,
+  });
+}
+
+async function updateCalendarEventGws(opts: UpdateCalendarOpts): Promise<void> {
+  await callExternalTool("gcal", "update_calendar", {
+    create_actions: [],
+    delete_actions: [],
+    update_actions: [
+      {
+        action: "update",
+        event_id: opts.eventId,
+        title: opts.title ?? null,
+        description: opts.description ?? null,
+        start_date_time: opts.start_date_time ?? null,
+        end_date_time: opts.end_date_time ?? null,
+        location: opts.location ?? null,
+        meeting_provider: null,
+        attendees: null,
+        optional_attendees: null,
+        recurrence: null,
+        connection_id: null,
+      },
+    ],
+    user_prompt: null,
+  });
+}
+
+export async function updateCalendarEvent(opts: UpdateCalendarOpts): Promise<void> {
+  return useServiceAccount ? updateCalendarEventServiceAccount(opts) : updateCalendarEventGws(opts);
+}
+
+async function deleteCalendarEventServiceAccount(eventId: string): Promise<void> {
+  const calendar = getCalendarClient();
+  await calendar.events.delete({ calendarId: CALENDAR_ID, eventId });
+}
+
+async function deleteCalendarEventGws(eventId: string): Promise<void> {
+  await callExternalTool("gcal", "update_calendar", {
+    create_actions: [],
+    delete_actions: [{ action: "delete", event_id: eventId, delete_scope: "single", connection_id: null }],
+    update_actions: [],
+    user_prompt: null,
+  });
+}
+
+export async function deleteCalendarEvent(eventId: string): Promise<void> {
+  return useServiceAccount ? deleteCalendarEventServiceAccount(eventId) : deleteCalendarEventGws(eventId);
+}

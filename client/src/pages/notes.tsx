@@ -21,9 +21,20 @@ import {
   DialogFooter,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { NotebookPen, ChevronDown, Plus, FolderOpen } from "lucide-react";
+import { NotebookPen, ChevronDown, Plus, FolderOpen, Trash2 } from "lucide-react";
 
 interface Note {
   row: number;
@@ -64,6 +75,8 @@ export default function Notes() {
 
   const [activeNote, setActiveNote] = useState<Note | null>(null);
   const [detailsDraft, setDetailsDraft] = useState("");
+  const [entryDraft, setEntryDraft] = useState("");
+  const [projectDraft, setProjectDraft] = useState("");
 
   const createNote = useMutation({
     mutationFn: async () => {
@@ -90,21 +103,42 @@ export default function Notes() {
   const saveDetails = useMutation({
     mutationFn: async () => {
       if (!activeNote) return;
-      await apiRequest("PATCH", `/api/notes/${activeNote.row}`, { details: detailsDraft });
+      await apiRequest("PATCH", `/api/notes/${activeNote.row}`, {
+        entry: entryDraft,
+        project: projectDraft,
+        details: detailsDraft,
+      });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["/api/notes"] });
       setActiveNote(null);
-      toast({ title: "Note details saved" });
+      toast({ title: "Note saved" });
     },
     onError: (err: any) => {
-      toast({ title: "Couldn't save details", description: err?.message, variant: "destructive" });
+      toast({ title: "Couldn't save note", description: err?.message, variant: "destructive" });
+    },
+  });
+
+  const deleteNote = useMutation({
+    mutationFn: async () => {
+      if (!activeNote) return;
+      await apiRequest("DELETE", `/api/notes/${activeNote.row}`);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/notes"] });
+      setActiveNote(null);
+      toast({ title: "Note deleted" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Couldn't delete note", description: err?.message, variant: "destructive" });
     },
   });
 
   const openNote = (n: Note) => {
     setActiveNote(n);
     setDetailsDraft(n.details ?? "");
+    setEntryDraft(n.entry ?? "");
+    setProjectDraft(n.project ?? "");
   };
 
   const GENERAL = "General";
@@ -147,7 +181,7 @@ export default function Notes() {
               <Plus className="h-4 w-4" />
             </Button>
           </DialogTrigger>
-          <DialogContent data-testid="dialog-add-note">
+          <DialogContent data-testid="dialog-add-note" className="max-h-[85vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>Add a note</DialogTitle>
             </DialogHeader>
@@ -163,7 +197,7 @@ export default function Notes() {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="new-note-entry">Note</Label>
+                <Label htmlFor="new-note-entry">Title</Label>
                 <Textarea
                   id="new-note-entry"
                   value={newEntry}
@@ -252,18 +286,36 @@ export default function Notes() {
       </div>
 
       <Dialog open={!!activeNote} onOpenChange={(open) => !open && setActiveNote(null)}>
-        <DialogContent data-testid="dialog-note-detail">
+        <DialogContent data-testid="dialog-note-detail" className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{activeNote?.date}</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
-            <p className="leading-relaxed" data-testid="text-note-detail-entry">
-              {activeNote?.entry}
-            </p>
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {activeNote?.project && <Badge variant="secondary">{activeNote.project}</Badge>}
-              {activeNote?.tags && <Badge variant="secondary">{activeNote.tags}</Badge>}
+            <div className="space-y-1.5">
+              <Label htmlFor="note-detail-entry">Title</Label>
+              <Textarea
+                id="note-detail-entry"
+                value={entryDraft}
+                onChange={(e) => setEntryDraft(e.target.value)}
+                className="min-h-16"
+                data-testid="textarea-note-detail-entry"
+              />
             </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="note-detail-project">Project</Label>
+              <ProjectCombobox
+                value={projectDraft}
+                onChange={setProjectDraft}
+                options={existingProjects}
+                placeholder="General"
+                testId="input-note-detail-project"
+              />
+            </div>
+            {activeNote?.tags && (
+              <div className="flex items-center gap-1.5 flex-wrap">
+                <Badge variant="secondary">{activeNote.tags}</Badge>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label htmlFor="note-details">Details</Label>
               <Textarea
@@ -276,10 +328,41 @@ export default function Notes() {
               />
             </div>
           </div>
-          <DialogFooter>
+          <DialogFooter className="flex flex-row items-center justify-between gap-2">
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="text-destructive shrink-0"
+                  data-testid="button-delete-note"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent data-testid="dialog-delete-note-confirm">
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete this note?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This can't be undone. The note will be permanently removed.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel data-testid="button-cancel-delete-note">Cancel</AlertDialogCancel>
+                  <AlertDialogAction
+                    onClick={() => deleteNote.mutate()}
+                    disabled={deleteNote.isPending}
+                    className="bg-destructive text-destructive-foreground hover-elevate"
+                    data-testid="button-confirm-delete-note"
+                  >
+                    Delete
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
             <Button
               onClick={() => saveDetails.mutate()}
-              disabled={saveDetails.isPending}
+              disabled={saveDetails.isPending || !entryDraft.trim()}
               data-testid="button-save-note-details"
             >
               Save

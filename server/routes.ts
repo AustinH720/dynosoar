@@ -1,17 +1,24 @@
 import type { Express } from "express";
 import type { Server } from "node:http";
-import { getValues, appendRow, updateRow, TABS, getSettings, updateSettings } from "./lib/sheets.js";
-import { createCalendarEvent } from "./lib/external.js";
+import { getValues, appendRow, updateRow, clearRange, TABS, getSettings, updateSettings, normalizeTime } from "./lib/sheets.js";
+import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./lib/external.js";
 import { classify, extractProject } from "./lib/classify.js";
-import { toIsoWithTz, todayStr, nowInAppTz } from "./lib/time.js";
+import { toIsoWithTz, todayStr, todayWeekday, nowInAppTz } from "./lib/time.js";
 import { findRecentDuplicate } from "./lib/dedupe.js";
 import {
   awardXp,
   getPlayerState,
   findBestTaskMatch,
   isCompletionPhrase,
+  isCancellationPhrase,
+  findBestEventMatch,
+  type OpenEvent,
   getRoutineItems,
   toggleRoutineComplete,
+  createRoutineItem,
+  updateRoutineItem,
+  deleteRoutineItem,
+  daysSetToLabel,
   getShopItems,
   purchaseShopItem,
   type OpenTask,
@@ -65,6 +72,7 @@ async function mirrorTaskDueDateToCalendar(taskText: string, dueDate: string, to
       eventLink,
       "Task due-date reminder",
       today,
+      calResult.eventId ?? "",
     ]);
     return eventLink;
   } catch (e: any) {
@@ -138,6 +146,54 @@ export async function registerRoutes(
         });
       }
 
+      // ---- Cancellation detection: "cancel my call mortgage broker renewal", "remove the dentist appointment" ----
+      if (isCancellationPhrase(text)) {
+        const eventValues = await getValues(TABS.EVENTS, "A2:I2000");
+        const openEvents: OpenEvent[] = rowsToObjects(eventValues, 2)
+          .filter((r) => r.cells[0])
+          .map((r) => ({
+            row: r.row,
+            title: r.cells[0] ?? "",
+            date: r.cells[1] ?? "",
+            eventId: r.cells[8] ?? "",
+          }))
+          .filter((e) => !e.date || e.date >= today); // ignore past events so a stale namesake never wins
+        const match = findBestEventMatch(text, openEvents);
+
+        let summary: string;
+        if (match) {
+          await clearRange(TABS.EVENTS, `A${match.row}:I${match.row}`);
+          if (match.eventId) {
+            try {
+              await deleteCalendarEvent(match.eventId);
+            } catch (e: any) {
+              console.error("Calendar delete failed:", e?.message);
+            }
+          }
+          summary = match.eventId
+            ? `Cancelled "${match.title}" and removed it from your calendar`
+            : `Cancelled "${match.title}" (no calendar sync available for this older event, but it's removed from Events)`;
+        } else {
+          summary = "Couldn't find a matching upcoming event to cancel — nothing was changed";
+        }
+
+        await appendRow(TABS.INBOX, [
+          timestamp,
+          text,
+          "Cancellation",
+          "Processed",
+          new Date().toISOString(),
+          `App capture: ${summary}`,
+        ]);
+
+        return res.json({
+          ok: true,
+          type: "Cancellation",
+          summary,
+          matchedEvent: match?.title ?? null,
+        });
+      }
+
       const { project, rest } = extractProject(text);
       const c = classify(rest, now);
 
@@ -170,6 +226,7 @@ export async function registerRoutes(
         const startIso = toIsoWithTz(c.eventDate!, c.startTime!);
         const endIso = toIsoWithTz(c.eventDate!, c.endTime!);
         let eventLink = "";
+        let capturedEventId = "";
         try {
           const calResult = await createCalendarEvent({
             title: text,
@@ -179,6 +236,7 @@ export async function registerRoutes(
             location: c.location ?? null,
           });
           eventLink = calResult.eventId ? dayViewLink(c.eventDate!) : "";
+          capturedEventId = calResult.eventId ?? "";
         } catch (e: any) {
           console.error("Calendar create failed:", e?.message);
           eventLink = "";
@@ -192,6 +250,7 @@ export async function registerRoutes(
           eventLink,
           "App capture",
           today,
+          capturedEventId,
         ]);
         summary = `Event scheduled for ${c.eventDate} at ${c.startTime}`;
         detail = { ...detail, date: c.eventDate, startTime: c.startTime, endTime: c.endTime, eventLink };
@@ -392,24 +451,99 @@ export async function registerRoutes(
   // ---------- Events ----------
   app.get("/api/events", async (_req, res) => {
     try {
-      const values = await getValues(TABS.EVENTS, "A2:H2000");
+      const values = await getValues(TABS.EVENTS, "A2:I2000");
       const events = rowsToObjects(values, 2)
         .filter((r) => r.cells[0])
         .map((r) => ({
           row: r.row,
           title: r.cells[0] ?? "",
           date: r.cells[1] ?? "",
-          startTime: r.cells[2] ?? "",
-          endTime: r.cells[3] ?? "",
+          startTime: normalizeTime(r.cells[2]),
+          endTime: normalizeTime(r.cells[3]),
           location: r.cells[4] ?? "",
           eventLink: r.cells[5] ?? "",
           source: r.cells[6] ?? "",
           dateAdded: r.cells[7] ?? "",
+          hasCalendarSync: Boolean(r.cells[8]),
         }));
       res.json(events);
     } catch (err: any) {
       console.error("Events fetch error:", err);
       res.status(500).json({ message: err.message || "Failed to load events" });
+    }
+  });
+
+  app.patch("/api/events/:row", async (req, res) => {
+    try {
+      const row = Number(req.params.row);
+      if (!row) {
+        return res.status(400).json({ message: "row is required" });
+      }
+      const existing = await getValues(TABS.EVENTS, `A${row}:I${row}`);
+      const prev = existing[0] ?? [];
+      const body = req.body ?? {};
+      const title = body.title != null ? String(body.title).trim() : prev[0] ?? "";
+      const date = body.date != null ? String(body.date) : prev[1] ?? "";
+      const startTime = normalizeTime(body.startTime != null ? String(body.startTime) : prev[2] ?? "");
+      const endTime = normalizeTime(body.endTime != null ? String(body.endTime) : prev[3] ?? "");
+      const location = body.location != null ? String(body.location) : prev[4] ?? "";
+      const eventLink = prev[5] ?? "";
+      const source = prev[6] ?? "";
+      const dateAdded = prev[7] ?? "";
+      const eventId = prev[8] ?? "";
+
+      if (eventId) {
+        try {
+          await updateCalendarEvent({
+            eventId,
+            title,
+            start_date_time: date && startTime ? toIsoWithTz(date, startTime) : null,
+            end_date_time: date && endTime ? toIsoWithTz(date, endTime) : null,
+            location: location || null,
+          });
+        } catch (e: any) {
+          console.error("Calendar update failed:", e?.message);
+        }
+      }
+
+      await updateRow(TABS.EVENTS, `A${row}:I${row}`, [
+        title,
+        date,
+        startTime,
+        endTime,
+        location,
+        eventLink,
+        source,
+        dateAdded,
+        eventId,
+      ]);
+      res.json({ ok: true, syncedToCalendar: Boolean(eventId) });
+    } catch (err: any) {
+      console.error("Event update error:", err);
+      res.status(500).json({ message: err.message || "Failed to update event" });
+    }
+  });
+
+  app.delete("/api/events/:row", async (req, res) => {
+    try {
+      const row = Number(req.params.row);
+      if (!row) {
+        return res.status(400).json({ message: "row is required" });
+      }
+      const existing = await getValues(TABS.EVENTS, `A${row}:I${row}`);
+      const eventId = existing[0]?.[8] ?? "";
+      if (eventId) {
+        try {
+          await deleteCalendarEvent(eventId);
+        } catch (e: any) {
+          console.error("Calendar delete failed:", e?.message);
+        }
+      }
+      await clearRange(TABS.EVENTS, `A${row}:I${row}`);
+      res.json({ ok: true, syncedToCalendar: Boolean(eventId) });
+    } catch (err: any) {
+      console.error("Event delete error:", err);
+      res.status(500).json({ message: err.message || "Failed to delete event" });
     }
   });
 
@@ -466,15 +600,43 @@ export async function registerRoutes(
   app.patch("/api/notes/:row", async (req, res) => {
     try {
       const row = Number(req.params.row);
-      const details = (req.body?.details ?? "").toString();
       if (!row) {
         return res.status(400).json({ message: "row is required" });
       }
-      await updateRow(TABS.NOTES, `F${row}`, [details]);
+      const existing = await getValues(TABS.NOTES, `A${row}:F${row}`);
+      const current = existing[0] ?? ["", "", "", "", "", ""];
+      const date = current[0] ?? todayStr();
+      const linked = current[3] ?? "";
+      const entry =
+        req.body?.entry !== undefined ? req.body.entry.toString().trim() : current[1] ?? "";
+      const tags =
+        req.body?.tags !== undefined ? req.body.tags.toString().trim() : current[2] ?? "";
+      const project =
+        req.body?.project !== undefined ? req.body.project.toString().trim() : current[4] ?? "";
+      const details =
+        req.body?.details !== undefined ? req.body.details.toString() : current[5] ?? "";
+      if (!entry) {
+        return res.status(400).json({ message: "entry is required" });
+      }
+      await updateRow(TABS.NOTES, `A${row}:F${row}`, [date, entry, tags, linked, project, details]);
       res.json({ ok: true });
     } catch (err: any) {
       console.error("Note update error:", err);
       res.status(500).json({ message: err.message || "Failed to update note" });
+    }
+  });
+
+  app.delete("/api/notes/:row", async (req, res) => {
+    try {
+      const row = Number(req.params.row);
+      if (!row) {
+        return res.status(400).json({ message: "row is required" });
+      }
+      await clearRange(TABS.NOTES, `A${row}:F${row}`);
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("Note delete error:", err);
+      res.status(500).json({ message: err.message || "Failed to delete note" });
     }
   });
 
@@ -504,10 +666,12 @@ export async function registerRoutes(
   });
 
   // ---------- Recurring routine checklist ----------
+  // /api/routine (singular) is the Home screen's "Today's Routine" widget —
+  // filtered to items actually scheduled for today's weekday.
   app.get("/api/routine", async (_req, res) => {
     try {
-      const items = await getRoutineItems(todayStr());
-      res.json(items);
+      const items = await getRoutineItems(todayStr(), todayWeekday());
+      res.json(items.filter((i) => i.scheduledToday));
     } catch (err: any) {
       console.error("Routine fetch error:", err);
       res.status(500).json({ message: err.message || "Failed to load routine" });
@@ -526,6 +690,77 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error("Routine toggle error:", err);
       res.status(500).json({ message: err.message || "Failed to update routine" });
+    }
+  });
+
+  // /api/routines (plural) is the full management list for the Routine tab —
+  // every item regardless of which day it's scheduled for.
+  app.get("/api/routines", async (_req, res) => {
+    try {
+      const items = await getRoutineItems(todayStr(), todayWeekday());
+      res.json(items);
+    } catch (err: any) {
+      console.error("Routines fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load routines" });
+    }
+  });
+
+  app.post("/api/routines", async (req, res) => {
+    try {
+      const activity = (req.body?.activity ?? "").toString().trim();
+      if (!activity) {
+        return res.status(400).json({ message: "activity is required" });
+      }
+      const dayIndices: number[] = Array.isArray(req.body?.dayIndices) ? req.body.dayIndices.map(Number) : [];
+      const days = dayIndices.length > 0 ? daysSetToLabel(dayIndices) : "Daily";
+      await createRoutineItem({
+        timeBlock: (req.body?.timeBlock ?? "").toString(),
+        activity,
+        days,
+        category: (req.body?.category ?? "").toString().trim() || "General",
+        notes: (req.body?.notes ?? "").toString(),
+      });
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("Routine create error:", err);
+      res.status(500).json({ message: err.message || "Failed to create routine" });
+    }
+  });
+
+  app.patch("/api/routines/:row", async (req, res) => {
+    try {
+      const row = Number(req.params.row);
+      if (!row) {
+        return res.status(400).json({ message: "row is required" });
+      }
+      const body = req.body ?? {};
+      const hasField = (key: string) => Object.prototype.hasOwnProperty.call(body, key);
+      const days = Array.isArray(body.dayIndices) ? daysSetToLabel(body.dayIndices.map(Number)) : undefined;
+      await updateRoutineItem(row, {
+        timeBlock: hasField("timeBlock") ? (body.timeBlock ?? "").toString() : undefined,
+        activity: hasField("activity") ? (body.activity ?? "").toString().trim() : undefined,
+        days,
+        category: hasField("category") ? (body.category ?? "").toString().trim() || "General" : undefined,
+        notes: hasField("notes") ? (body.notes ?? "").toString() : undefined,
+      });
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("Routine update error:", err);
+      res.status(500).json({ message: err.message || "Failed to update routine" });
+    }
+  });
+
+  app.delete("/api/routines/:row", async (req, res) => {
+    try {
+      const row = Number(req.params.row);
+      if (!row) {
+        return res.status(400).json({ message: "row is required" });
+      }
+      await deleteRoutineItem(row);
+      res.json({ ok: true });
+    } catch (err: any) {
+      console.error("Routine delete error:", err);
+      res.status(500).json({ message: err.message || "Failed to delete routine" });
     }
   });
 
@@ -610,8 +845,8 @@ export async function registerRoutes(
           row: r.row,
           title: r.cells[0] ?? "",
           date: r.cells[1] ?? "",
-          startTime: r.cells[2] ?? "",
-          endTime: r.cells[3] ?? "",
+          startTime: normalizeTime(r.cells[2]),
+          endTime: normalizeTime(r.cells[3]),
           location: r.cells[4] ?? "",
         }))
         .filter((e) => e.date === today)

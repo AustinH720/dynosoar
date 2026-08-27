@@ -103,6 +103,25 @@ export async function updateRow(tab: string, a1Range: string, row: any[]): Promi
   );
 }
 
+export async function clearRange(tab: string, a1Range: string): Promise<any> {
+  if (useServiceAccount) {
+    const sheets = getSheetsClient();
+    const res = await sheets.spreadsheets.values.clear({
+      spreadsheetId: SPREADSHEET_ID,
+      range: quoteRange(tab, a1Range),
+    });
+    return res.data;
+  }
+  return execGws(
+    ["sheets", "spreadsheets", "values", "clear"],
+    {
+      spreadsheetId: SPREADSHEET_ID,
+      range: quoteRange(tab, a1Range),
+    },
+    {},
+  );
+}
+
 export interface AppSettings {
   themeMode: "Light" | "Dark" | "System";
   accentColor: string;
@@ -130,6 +149,24 @@ export async function updateSettings(patch: Partial<AppSettings>): Promise<AppSe
   const next: AppSettings = { ...current, ...patch };
   await updateRow(TABS.PLAYER, "I2:K2", [next.themeMode, next.accentColor, next.backgroundScene]);
   return next;
+}
+
+// Google Sheets (USER_ENTERED) auto-parses "09:15" as a time value and can hand it back
+// via FORMATTED_VALUE without the leading zero (e.g. "9:15"). <input type="time"> requires a
+// strict zero-padded "HH:MM", so every time-like cell read from a sheet must pass through this
+// before being sent to the frontend.
+export function normalizeTime(value: string | undefined | null): string {
+  if (!value) return "";
+  const trimmed = value.trim();
+  const match = trimmed.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(am|pm|AM|PM)?$/);
+  if (!match) return trimmed;
+  let hour = parseInt(match[1], 10);
+  const minute = match[2];
+  const meridiem = match[3]?.toLowerCase();
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (hour > 23 || hour < 0) return trimmed;
+  return `${String(hour).padStart(2, "0")}:${minute}`;
 }
 
 export const TABS = {

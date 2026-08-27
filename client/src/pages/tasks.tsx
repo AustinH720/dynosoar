@@ -37,6 +37,7 @@ import {
 } from "@/components/ui/select";
 import { ProjectCombobox } from "@/components/ProjectCombobox";
 import { apiRequest } from "@/lib/queryClient";
+import { useXpPopup, type XpAward } from "@/components/XpPopup";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { CheckSquare, ChevronDown, Plus, FolderOpen, MoreVertical, Repeat } from "lucide-react";
@@ -143,15 +144,18 @@ function TaskRow({
 
 function useTaskToggle() {
   const qc = useQueryClient();
+  const { showXp } = useXpPopup();
   return useMutation({
     mutationFn: async ({ row, status }: { row: number; status: string }) => {
-      await apiRequest("PATCH", `/api/tasks/${row}`, { status });
+      const res = await apiRequest("PATCH", `/api/tasks/${row}`, { status });
+      return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: { xp?: XpAward | null }) => {
       qc.invalidateQueries({ queryKey: ["/api/tasks"] });
       qc.invalidateQueries({ queryKey: ["/api/player"] });
       qc.invalidateQueries({ queryKey: ["/api/skills"] });
       qc.invalidateQueries({ queryKey: ["/api/shop"] });
+      showXp(data?.xp);
     },
   });
 }

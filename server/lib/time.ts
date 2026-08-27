@@ -15,7 +15,9 @@ function getTzOffset(dateStr: string, timeZone: string): string {
 /** Builds an ISO 8601 string with the correct America/Toronto UTC offset for a given local date/time. */
 export function toIsoWithTz(dateStr: string, timeStr: string): string {
   const offset = getTzOffset(dateStr, APP_TZ);
-  return `${dateStr}T${timeStr}:00${offset}`;
+  const [h, m = "00"] = timeStr.split(":");
+  const paddedTime = `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
+  return `${dateStr}T${paddedTime}:00${offset}`;
 }
 
 export function todayStr(): string {
@@ -27,6 +29,14 @@ export function todayStr(): string {
     day: "2-digit",
   });
   return fmt.format(now); // en-CA gives YYYY-MM-DD
+}
+
+/** Day of week in America/Toronto, 0=Sunday .. 6=Saturday. */
+export function todayWeekday(): number {
+  const now = new Date();
+  const label = new Intl.DateTimeFormat("en-US", { timeZone: APP_TZ, weekday: "short" }).format(now);
+  const idx = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(label);
+  return idx === -1 ? now.getDay() : idx;
 }
 
 export function nowInAppTz(): Date {

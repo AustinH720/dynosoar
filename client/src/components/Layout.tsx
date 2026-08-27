@@ -3,13 +3,14 @@ import type { ReactNode } from "react";
 import { Logo } from "./Logo";
 import { useTheme } from "@/lib/theme";
 import { Button } from "@/components/ui/button";
-import { Home as HomeIcon, CheckSquare, CalendarDays, NotebookPen, Sun, Moon, Settings as SettingsIcon, Store } from "lucide-react";
+import { Home as HomeIcon, CheckSquare, CalendarDays, NotebookPen, Sun, Moon, Settings as SettingsIcon, Store, Repeat } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { path: "/", label: "Home", icon: HomeIcon, testId: "nav-home" },
   { path: "/tasks", label: "Tasks", icon: CheckSquare, testId: "nav-tasks" },
   { path: "/events", label: "Events", icon: CalendarDays, testId: "nav-events" },
+  { path: "/routine", label: "Routine", icon: Repeat, testId: "nav-routine" },
   { path: "/notes", label: "Notes", icon: NotebookPen, testId: "nav-notes" },
   { path: "/shop", label: "Shop", icon: Store, testId: "nav-shop" },
 ];
@@ -57,7 +58,7 @@ export function Layout({ children, title }: { children: ReactNode; title: string
       <main className="flex-1 max-w-lg mx-auto w-full px-4 pb-28 pt-4">{children}</main>
 
       <nav className="fixed bottom-0 left-0 right-0 z-20 border-t border-border bg-background/95 backdrop-blur-sm pb-[env(safe-area-inset-bottom)]">
-        <div className="max-w-lg mx-auto grid grid-cols-5">
+        <div className="max-w-lg mx-auto grid grid-cols-6">
           {NAV_ITEMS.map((item) => {
             const active = location === item.path;
             const Icon = item.icon;

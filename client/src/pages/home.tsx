@@ -19,6 +19,7 @@ import {
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { useSettings } from "@/hooks/use-settings";
+import { useXpPopup } from "@/components/XpPopup";
 import { cn } from "@/lib/utils";
 import {
   CalendarDays,
@@ -32,6 +33,7 @@ import {
   Sparkles,
   ListChecks,
   Copy,
+  CalendarX,
 } from "lucide-react";
 
 interface TodayResponse {
@@ -42,6 +44,7 @@ interface TodayResponse {
 
 interface XpResult {
   xpAwarded: number;
+  coinsAwarded?: number;
   leveledUp: boolean;
   stageChanged: boolean;
   player: PlayerState;
@@ -70,6 +73,7 @@ const TYPE_META: Record<string, { icon: any; label: string }> = {
   Note: { icon: NotebookPen, label: "Note" },
   Recurring: { icon: Repeat, label: "Recurring" },
   Completion: { icon: PartyPopper, label: "Completed" },
+  Cancellation: { icon: CalendarX, label: "Cancelled" },
 };
 
 function greeting() {
@@ -94,6 +98,7 @@ export default function Home() {
   const [levelUp, setLevelUp] = useState<{ level: number; stageChanged: boolean; stageName: string } | null>(null);
   const { toast } = useToast();
   const qc = useQueryClient();
+  const { showXp } = useXpPopup();
 
   const [duplicateInfo, setDuplicateInfo] = useState<{ text: string; date: string; type: string } | null>(null);
 
@@ -131,9 +136,8 @@ export default function Home() {
         });
       } else {
         setLevelUp(null);
-        toast({
-          title: data.xp ? `${data.summary} · +${data.xp.xpAwarded} XP` : data.summary,
-        });
+        toast({ title: data.summary });
+        showXp(data.xp);
       }
     },
     onError: (err: any) => {
@@ -156,9 +160,7 @@ export default function Home() {
       qc.invalidateQueries({ queryKey: ["/api/player"] });
       qc.invalidateQueries({ queryKey: ["/api/skills"] });
       qc.invalidateQueries({ queryKey: ["/api/shop"] });
-      if (data?.xp) {
-        toast({ title: `Task complete · +${data.xp.xpAwarded} XP` });
-      }
+      showXp(data?.xp);
     },
     onError: (err: any) => {
       toast({
@@ -179,9 +181,7 @@ export default function Home() {
       qc.invalidateQueries({ queryKey: ["/api/player"] });
       qc.invalidateQueries({ queryKey: ["/api/skills"] });
       qc.invalidateQueries({ queryKey: ["/api/shop"] });
-      if (data.xp) {
-        toast({ title: `Routine complete · +${data.xp.xpAwarded} XP` });
-      }
+      showXp(data.xp);
     },
   });
 
