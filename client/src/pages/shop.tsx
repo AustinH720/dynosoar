@@ -32,6 +32,9 @@ interface ShopItem {
   owned: boolean;
   unlocked: boolean;
   canAfford: boolean;
+  emoji: string;
+  slot: string | null;
+  equipped: boolean;
 }
 
 interface ShopResponse {
@@ -53,7 +56,25 @@ function nextTier(xp: number) {
   return TIERS.find((t) => t > xp) ?? TIERS[TIERS.length - 1];
 }
 
-function ShopItemCard({ item, onPurchase, pending }: { item: ShopItem; onPurchase: (row: number) => void; pending: boolean }) {
+const SKILL_TILE_CLASSES: Record<SkillId, string> = {
+  strength: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
+  smarter: "bg-blue-500/15 text-blue-600 dark:text-blue-400",
+  fishing: "bg-teal-500/15 text-teal-600 dark:text-teal-400",
+};
+
+function ShopItemCard({
+  item,
+  onPurchase,
+  pending,
+  onEquip,
+  equipPending,
+}: {
+  item: ShopItem;
+  onPurchase: (row: number) => void;
+  pending: boolean;
+  onEquip: (row: number, equip: boolean) => void;
+  equipPending: boolean;
+}) {
   const locked = !item.unlocked;
   return (
     <Card
@@ -62,9 +83,21 @@ function ShopItemCard({ item, onPurchase, pending }: { item: ShopItem; onPurchas
     >
       <CardContent className="p-4 flex flex-col gap-2">
         <div className="flex items-start justify-between gap-2">
-          <div>
-            <p className="font-display font-semibold text-sm leading-snug">{item.name}</p>
-            <p className="text-xs text-muted-foreground mt-0.5">{item.description}</p>
+          <div className="flex items-start gap-2.5">
+            <div
+              className={cn(
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-lg",
+                SKILL_TILE_CLASSES[item.skill],
+              )}
+              data-testid={`icon-shop-item-${item.row}`}
+              aria-hidden="true"
+            >
+              {item.emoji}
+            </div>
+            <div>
+              <p className="font-display font-semibold text-sm leading-snug">{item.name}</p>
+              <p className="text-xs text-muted-foreground mt-0.5">{item.description}</p>
+            </div>
           </div>
           {item.owned ? (
             <Badge className="gap-1 shrink-0 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30" variant="outline">
@@ -94,6 +127,24 @@ function ShopItemCard({ item, onPurchase, pending }: { item: ShopItem; onPurchas
             {locked ? "Locked" : `Buy for ${item.coinCost}`}
           </Button>
         )}
+        {item.owned && item.slot && (
+          <Button
+            size="sm"
+            variant={item.equipped ? "secondary" : "outline"}
+            className="mt-1 gap-1.5"
+            disabled={equipPending}
+            onClick={() => onEquip(item.row, !item.equipped)}
+            data-testid={`button-equip-${item.row}`}
+          >
+            {item.equipped ? (
+              <>
+                <Check className="h-3.5 w-3.5" /> Equipped
+              </>
+            ) : (
+              "Equip on Mossback"
+            )}
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
@@ -118,6 +169,21 @@ export default function Shop() {
     },
     onError: (err: any) => {
       toast({ title: "Couldn't buy that", description: err?.message, variant: "destructive" });
+    },
+  });
+
+  const equip = useMutation({
+    mutationFn: async ({ row, equip }: { row: number; equip: boolean }) => {
+      const res = await apiRequest("POST", `/api/shop/${row}/equip`, { equip });
+      return await res.json();
+    },
+    onSuccess: (_data, variables) => {
+      qc.invalidateQueries({ queryKey: ["/api/shop"] });
+      qc.invalidateQueries({ queryKey: ["/api/equipped"] });
+      toast({ title: variables.equip ? "Equipped on Mossback!" : "Unequipped" });
+    },
+    onError: (err: any) => {
+      toast({ title: "Couldn't update that", description: err?.message, variant: "destructive" });
     },
   });
 
@@ -198,7 +264,14 @@ export default function Shop() {
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {filteredItems.map((item) => (
-                <ShopItemCard key={item.row} item={item} onPurchase={(row) => purchase.mutate(row)} pending={purchase.isPending} />
+                <ShopItemCard
+                  key={item.row}
+                  item={item}
+                  onPurchase={(row) => purchase.mutate(row)}
+                  pending={purchase.isPending}
+                  onEquip={(row, shouldEquip) => equip.mutate({ row, equip: shouldEquip })}
+                  equipPending={equip.isPending}
+                />
               ))}
             </div>
           )}

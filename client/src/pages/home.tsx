@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Layout } from "@/components/Layout";
-import { DinoCompanion, type PlayerState } from "@/components/DinoCompanion";
+import { DinoCompanion, type PlayerState, type EquippedItem } from "@/components/DinoCompanion";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -104,6 +104,7 @@ export default function Home() {
 
   const today = useQuery<TodayResponse>({ queryKey: ["/api/today"] });
   const player = useQuery<PlayerState>({ queryKey: ["/api/player"] });
+  const equipped = useQuery<{ items: EquippedItem[] }>({ queryKey: ["/api/equipped"] });
   const { data: settings } = useSettings();
   const routine = useQuery<RoutineItem[]>({ queryKey: ["/api/routine"] });
 
@@ -214,10 +215,8 @@ export default function Home() {
           </div>
         )}
 
-        <DinoCompanion player={player.data} backgroundScene={settings?.backgroundScene} />
-
-        <Card className="border-card-border">
-          <CardContent className="pt-5 pb-4 space-y-3">
+        <DinoCompanion player={player.data} backgroundScene={settings?.backgroundScene} equippedItems={equipped.data?.items}>
+          <div className="rounded-xl bg-card/90 backdrop-blur-sm border border-card-border px-4 pt-3 pb-3.5 space-y-3 shadow-sm">
             <Textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
@@ -228,9 +227,8 @@ export default function Home() {
                 }
               }}
               placeholder="Add a task, add an event, or say “completed the CFA practice set”..."
-              className="min-h-24 resize-none text-base border-none shadow-none px-0 focus-visible:ring-0"
+              className="min-h-20 resize-none text-base border-none shadow-none px-0 focus-visible:ring-0 bg-transparent"
               data-testid="input-capture"
-              autoFocus
             />
             <Button
               className="w-full"
@@ -246,8 +244,8 @@ export default function Home() {
               )}
               Add to the Nest
             </Button>
-          </CardContent>
-        </Card>
+          </div>
+        </DinoCompanion>
 
         {lastResult && ResultIcon && (
           <div

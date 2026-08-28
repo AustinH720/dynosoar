@@ -9,6 +9,10 @@ export interface Classification {
   startTime?: string; // HH:mm
   endTime?: string; // HH:mm
   location?: string | null;
+  // Event/Recurring title with the recognized date/time phrase removed,
+  // e.g. "Akira movie September 8 at 7pm" -> "Akira movie". Falls back to
+  // the original text if stripping would leave nothing usable.
+  cleanTitle?: string;
   // Task fields
   dueDate?: string | null; // YYYY-MM-DD
   priority?: "High" | "Medium";
@@ -16,6 +20,11 @@ export interface Classification {
   // Recurring
   rrule?: string;
   cadenceLabel?: string;
+  // True when the entry included an explicit clock time ("at 7pm"). When
+  // false, the recurring routine has no fixed time block — it's a
+  // general/any-time habit (e.g. "water change on Wednesday") and should
+  // not get a forced default time or a timed calendar event.
+  hasExplicitTime?: boolean;
 }
 
 const RECURRING_PATTERNS: { re: RegExp; label: string; rrule: string }[] = [
@@ -38,7 +47,6 @@ const WEEKDAY_CODES: Record<string, { code: string; label: string }> = {
 };
 const SPECIFIC_WEEKDAY_RE = /\bevery\s+(mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
 
-const DEFAULT_RECURRING_TIME = "09:00";
 const DEFAULT_RECURRING_DURATION_MIN = 30;
 
 const ACTION_VERBS =
@@ -87,6 +95,23 @@ function fmtTime(d: Date): string {
   return `${h}:${m}`;
 }
 
+/**
+ * Removes the exact date/time phrase chrono matched (e.g. "September 8 at
+ * 7pm") from the raw entry text, then trims any dangling connector words
+ * left behind ("movie at", "lunch on", trailing commas) so the remaining
+ * text reads as a clean event title. Falls back to the original text if
+ * stripping would leave nothing (or only punctuation) behind.
+ */
+function stripDateTimePhrase(text: string, matchedText: string): string {
+  let result = text.replace(matchedText, " ").replace(/\s{2,}/g, " ").trim();
+  // Drop a connector word left dangling at the very end or start of the
+  // remaining text ("Akira movie at" -> "Akira movie", "on Dinner" -> "Dinner").
+  result = result.replace(/\s+(at|on|this|next|for)\s*$/i, "").trim();
+  result = result.replace(/^(at|on|for)\s+/i, "").trim();
+  result = result.replace(/\s*,\s*$/, "").replace(/^\s*,\s*/, "").trim();
+  return result.length > 0 ? result : text;
+}
+
 export function classify(text: string, now: Date = new Date()): Classification {
   const trimmed = text.trim();
 
@@ -112,22 +137,23 @@ export function classify(text: string, now: Date = new Date()): Classification {
       const withTime = timeResults.find((r) => r.start.isCertain("hour"));
 
       let startDate: Date;
-      let endDate: Date;
+      let endDate: Date | null = null;
+      let hasExplicitTime = false;
       if (withTime) {
+        hasExplicitTime = true;
         startDate = withTime.start.date();
         endDate = withTime.end
           ? withTime.end.date()
           : new Date(startDate.getTime() + DEFAULT_RECURRING_DURATION_MIN * 60 * 1000);
       } else {
-        // No explicit time — anchor on the next matching date chrono found
-        // (e.g. "Wednesday" -> next Wednesday), or today if it found none,
-        // and apply a sensible default time so the entry can always get a
-        // real calendar slot and a due date on the Tasks list.
+        // No explicit time ("general", no clock time mentioned) — anchor on
+        // the next matching date chrono found (e.g. "Wednesday" -> next
+        // Wednesday), or today if it found none, but leave the time itself
+        // unspecified rather than guessing a default. The routine gets no
+        // fixed time block and no timed calendar event.
         const anyDateResult = timeResults[0];
         const anchor = anyDateResult ? anyDateResult.start.date() : new Date(now);
-        const [dh, dm] = DEFAULT_RECURRING_TIME.split(":").map(Number);
-        startDate = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate(), dh, dm);
-        endDate = new Date(startDate.getTime() + DEFAULT_RECURRING_DURATION_MIN * 60 * 1000);
+        startDate = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate());
       }
 
       return {
@@ -135,9 +161,10 @@ export function classify(text: string, now: Date = new Date()): Classification {
         rrule,
         cadenceLabel: label,
         eventDate: fmtDate(startDate),
-        startTime: fmtTime(startDate),
-        endTime: fmtTime(endDate),
+        startTime: hasExplicitTime ? fmtTime(startDate) : undefined,
+        endTime: hasExplicitTime && endDate ? fmtTime(endDate) : undefined,
         category: guessCategory(trimmed),
+        hasExplicitTime,
       };
     }
   }
@@ -164,6 +191,7 @@ export function classify(text: string, now: Date = new Date()): Classification {
         endTime: fmtTime(endDate),
         location: null,
         category: guessCategory(trimmed),
+        cleanTitle: stripDateTimePhrase(trimmed, r.text),
       };
     } else {
       return {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import stage1 from "@/assets/dino/stage1.png";
 import stage2 from "@/assets/dino/stage2.png";
 import stage3 from "@/assets/dino/stage3.png";
@@ -36,6 +36,13 @@ export interface PlayerState {
   levelRange: string;
   coins?: number;
   hunger?: HungerInfo;
+}
+
+export interface EquippedItem {
+  slot: string;
+  name: string;
+  emoji: string;
+  skill: string;
 }
 
 const STAGE_IMAGES: Record<number, string> = {
@@ -89,9 +96,13 @@ const BLINK_DURATION_MS = 1400;
 export function DinoCompanion({
   player,
   backgroundScene,
+  equippedItems,
+  children,
 }: {
   player?: PlayerState;
   backgroundScene?: string;
+  equippedItems?: EquippedItem[];
+  children?: ReactNode;
 }) {
   const [blinking, setBlinking] = useState(false);
 
@@ -112,6 +123,7 @@ export function DinoCompanion({
           <Skeleton className="h-4 w-32" />
           <Skeleton className="h-2.5 w-full rounded-full" />
         </CardContent>
+        {children && <CardContent className="pt-0 pb-5">{children}</CardContent>}
       </Card>
     );
   }
@@ -132,6 +144,16 @@ export function DinoCompanion({
         }}
       >
         <div className="absolute inset-0 bg-background/45 backdrop-blur-[1px]" aria-hidden="true" />
+        <div
+          className="absolute top-3 left-3 flex flex-col gap-1 rounded-xl bg-background/75 backdrop-blur px-2.5 py-1.5 shadow-sm"
+          data-testid="hud-xp"
+        >
+          <span className="text-[11px] font-semibold leading-none">Lv. {player.level}</span>
+          <Progress value={pct} className="h-1.5 w-16" data-testid="progress-xp" />
+          <span className="text-[9px] text-muted-foreground leading-none">
+            {player.xpIntoLevel}/{player.xpToNextLevel} XP
+          </span>
+        </div>
         {player.hunger && player.hunger.level !== "fed" && (
           <Badge
             variant="outline"
@@ -169,6 +191,20 @@ export function DinoCompanion({
           <p className="text-xs text-muted-foreground" data-testid="text-companion-stage">
             {player.stageName} · {player.levelRange}
           </p>
+          {equippedItems && equippedItems.length > 0 && (
+            <div className="flex items-center justify-center gap-1.5 mt-2" data-testid="row-equipped-items">
+              {equippedItems.map((it) => (
+                <span
+                  key={it.slot}
+                  title={it.name}
+                  className="flex h-7 w-7 items-center justify-center rounded-full bg-background/85 backdrop-blur border border-card-border shadow-sm text-sm"
+                  data-testid={`badge-equipped-${it.slot}`}
+                >
+                  {it.emoji}
+                </span>
+              ))}
+            </div>
+          )}
           {player.hunger && player.hunger.level !== "fed" && (
             <p
               className={cn(
@@ -183,12 +219,7 @@ export function DinoCompanion({
             </p>
           )}
         </div>
-        <div className="relative w-full space-y-1">
-          <Progress value={pct} className="h-2.5" data-testid="progress-xp" />
-          <p className="text-xs text-muted-foreground text-center" data-testid="text-xp-progress">
-            {player.xpIntoLevel} / {player.xpToNextLevel} XP to next level
-          </p>
-        </div>
+        {children && <div className="relative w-full mt-1">{children}</div>}
       </div>
     </Card>
   );

@@ -28,7 +28,16 @@ import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { CalendarDays, MapPin, ExternalLink, ChevronLeft, ChevronRight, Trash2, CalendarOff } from "lucide-react";
-import { addDays, format, startOfWeek } from "date-fns";
+import {
+  addDays,
+  addMonths,
+  endOfMonth,
+  endOfWeek,
+  format,
+  isSameMonth,
+  startOfMonth,
+  startOfWeek,
+} from "date-fns";
 
 interface EventRow {
   row: number;
@@ -120,6 +129,8 @@ export default function Events() {
   const { toast } = useToast();
   const { data, isLoading, isError } = useQuery<EventRow[]>({ queryKey: ["/api/events"] });
   const [weekOffset, setWeekOffset] = useState(0);
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [viewMode, setViewMode] = useState<"week" | "month">("week");
   const [selectedDay, setSelectedDay] = useState<string | null>(todayIso());
 
   const [activeEvent, setActiveEvent] = useState<EventRow | null>(null);
@@ -136,6 +147,29 @@ export default function Events() {
     setWeekOffset((w) => w + delta);
     setSelectedDay(null);
   };
+
+  const monthDate = useMemo(() => addMonths(new Date(), monthOffset), [monthOffset]);
+
+  const monthDays = useMemo(() => {
+    const start = startOfWeek(startOfMonth(monthDate), { weekStartsOn: 0 });
+    const end = endOfWeek(endOfMonth(monthDate), { weekStartsOn: 0 });
+    const days: Date[] = [];
+    let cur = start;
+    while (cur <= end) {
+      days.push(cur);
+      cur = addDays(cur, 1);
+    }
+    return days;
+  }, [monthDate]);
+
+  const monthIsoSet = useMemo(() => new Set(monthDays.map((d) => format(d, "yyyy-MM-dd"))), [monthDays]);
+
+  const changeMonth = (delta: number) => {
+    setMonthOffset((m) => m + delta);
+    setSelectedDay(null);
+  };
+
+  const visibleIsoSet = viewMode === "week" ? weekIsoSet : monthIsoSet;
 
   const eventsByDate = useMemo(() => {
     const map = new Map<string, EventRow[]>();
@@ -221,82 +255,156 @@ export default function Events() {
     },
   });
 
-  const selectedItems = selectedDay && weekIsoSet.has(selectedDay) ? (eventsByDate.get(selectedDay) ?? []) : [];
-  const showDayPanel = !!selectedDay && weekIsoSet.has(selectedDay);
+  const selectedItems = selectedDay && visibleIsoSet.has(selectedDay) ? (eventsByDate.get(selectedDay) ?? []) : [];
+  const showDayPanel = !!selectedDay && visibleIsoSet.has(selectedDay);
   const weekLabel =
     weekDays.length > 0
       ? format(weekDays[0], "MMM") === format(weekDays[6], "MMM")
         ? format(weekDays[0], "MMMM yyyy")
         : `${format(weekDays[0], "MMM")} – ${format(weekDays[6], "MMM yyyy")}`
       : "";
+  const monthLabel = format(monthDate, "MMMM yyyy");
 
   return (
     <Layout title="Events">
       <Card className="border-card-border mb-5">
         <CardContent className="py-3.5 space-y-3">
+          <div className="flex items-center justify-center">
+            <div className="flex items-center gap-0.5 rounded-lg bg-muted p-0.5" data-testid="toggle-view-mode">
+              <button
+                onClick={() => setViewMode("week")}
+                className={cn(
+                  "px-3 py-1 rounded-md text-xs font-medium transition-colors",
+                  viewMode === "week" ? "bg-background shadow-sm" : "text-muted-foreground",
+                )}
+                data-testid="button-view-week"
+              >
+                Week
+              </button>
+              <button
+                onClick={() => setViewMode("month")}
+                className={cn(
+                  "px-3 py-1 rounded-md text-xs font-medium transition-colors",
+                  viewMode === "month" ? "bg-background shadow-sm" : "text-muted-foreground",
+                )}
+                data-testid="button-view-month"
+              >
+                Month
+              </button>
+            </div>
+          </div>
+
           <div className="flex items-center justify-between">
             <Button
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={() => changeWeek(-1)}
-              data-testid="button-week-prev"
-              aria-label="Previous week"
+              onClick={() => (viewMode === "week" ? changeWeek(-1) : changeMonth(-1))}
+              data-testid={viewMode === "week" ? "button-week-prev" : "button-month-prev"}
+              aria-label={viewMode === "week" ? "Previous week" : "Previous month"}
             >
               <ChevronLeft className="h-4 w-4" />
             </Button>
-            <p className="text-sm font-medium" data-testid="text-week-label">
-              {weekLabel}
+            <p className="text-sm font-medium" data-testid={viewMode === "week" ? "text-week-label" : "text-month-label"}>
+              {viewMode === "week" ? weekLabel : monthLabel}
             </p>
             <Button
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={() => changeWeek(1)}
-              data-testid="button-week-next"
-              aria-label="Next week"
+              onClick={() => (viewMode === "week" ? changeWeek(1) : changeMonth(1))}
+              data-testid={viewMode === "week" ? "button-week-next" : "button-month-next"}
+              aria-label={viewMode === "week" ? "Next week" : "Next month"}
             >
               <ChevronRight className="h-4 w-4" />
             </Button>
           </div>
 
-          <div className="grid grid-cols-7 gap-1">
-            {weekDays.map((d) => {
-              const iso = format(d, "yyyy-MM-dd");
-              const isToday = iso === todayIso();
-              const isSelected = iso === selectedDay;
-              const hasEvents = (eventsByDate.get(iso)?.length ?? 0) > 0;
-              return (
-                <button
-                  key={iso}
-                  onClick={() => setSelectedDay(isSelected ? null : iso)}
-                  className={cn(
-                    "flex flex-col items-center gap-1 rounded-lg py-2 transition-colors",
-                    isSelected ? "bg-primary text-primary-foreground" : "hover-elevate",
-                  )}
-                  data-testid={`button-weekday-${iso}`}
-                >
-                  <span className={cn("text-[10px] uppercase tracking-wide", !isSelected && "text-muted-foreground")}>
-                    {format(d, "EEE")}
-                  </span>
-                  <span
+          {viewMode === "week" ? (
+            <div className="grid grid-cols-7 gap-1">
+              {weekDays.map((d) => {
+                const iso = format(d, "yyyy-MM-dd");
+                const isToday = iso === todayIso();
+                const isSelected = iso === selectedDay;
+                const hasEvents = (eventsByDate.get(iso)?.length ?? 0) > 0;
+                return (
+                  <button
+                    key={iso}
+                    onClick={() => setSelectedDay(isSelected ? null : iso)}
                     className={cn(
-                      "text-sm font-semibold h-6 w-6 flex items-center justify-center rounded-full",
-                      isToday && !isSelected && "border border-primary text-primary",
+                      "flex flex-col items-center gap-1 rounded-lg py-2 transition-colors",
+                      isSelected ? "bg-primary text-primary-foreground" : "hover-elevate",
                     )}
+                    data-testid={`button-weekday-${iso}`}
                   >
-                    {format(d, "d")}
+                    <span className={cn("text-[10px] uppercase tracking-wide", !isSelected && "text-muted-foreground")}>
+                      {format(d, "EEE")}
+                    </span>
+                    <span
+                      className={cn(
+                        "text-sm font-semibold h-6 w-6 flex items-center justify-center rounded-full",
+                        isToday && !isSelected && "border border-primary text-primary",
+                      )}
+                    >
+                      {format(d, "d")}
+                    </span>
+                    <span
+                      className={cn(
+                        "h-1 w-1 rounded-full",
+                        hasEvents ? (isSelected ? "bg-primary-foreground" : "bg-primary") : "bg-transparent",
+                      )}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <div className="grid grid-cols-7 gap-1 text-center">
+                {["S", "M", "T", "W", "T", "F", "S"].map((lbl, i) => (
+                  <span key={i} className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {lbl}
                   </span>
-                  <span
-                    className={cn(
-                      "h-1 w-1 rounded-full",
-                      hasEvents ? (isSelected ? "bg-primary-foreground" : "bg-primary") : "bg-transparent",
-                    )}
-                  />
-                </button>
-              );
-            })}
-          </div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-1" data-testid="grid-month">
+                {monthDays.map((d) => {
+                  const iso = format(d, "yyyy-MM-dd");
+                  const isToday = iso === todayIso();
+                  const isSelected = iso === selectedDay;
+                  const inMonth = isSameMonth(d, monthDate);
+                  const hasEvents = (eventsByDate.get(iso)?.length ?? 0) > 0;
+                  return (
+                    <button
+                      key={iso}
+                      onClick={() => setSelectedDay(isSelected ? null : iso)}
+                      className={cn(
+                        "flex flex-col items-center gap-0.5 rounded-lg py-1.5 transition-colors",
+                        isSelected ? "bg-primary text-primary-foreground" : "hover-elevate",
+                        !inMonth && !isSelected && "opacity-35",
+                      )}
+                      data-testid={`button-monthday-${iso}`}
+                    >
+                      <span
+                        className={cn(
+                          "text-xs font-medium h-6 w-6 flex items-center justify-center rounded-full",
+                          isToday && !isSelected && "border border-primary text-primary",
+                        )}
+                      >
+                        {format(d, "d")}
+                      </span>
+                      <span
+                        className={cn(
+                          "h-1 w-1 rounded-full",
+                          hasEvents ? (isSelected ? "bg-primary-foreground" : "bg-primary") : "bg-transparent",
+                        )}
+                      />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {showDayPanel && (
             <div className="pt-2 border-t border-border space-y-2" data-testid="panel-day-detail">

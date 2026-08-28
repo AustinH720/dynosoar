@@ -21,6 +21,8 @@ import {
   daysSetToLabel,
   getShopItems,
   purchaseShopItem,
+  equipShopItem,
+  getEquippedItems,
   type OpenTask,
 } from "./lib/gamification.js";
 
@@ -225,11 +227,14 @@ export async function registerRoutes(
       if (c.type === "Event") {
         const startIso = toIsoWithTz(c.eventDate!, c.startTime!);
         const endIso = toIsoWithTz(c.eventDate!, c.endTime!);
+        // Store/display just the subject (date/time phrase stripped), since
+        // the actual date and time already live in their own fields/columns.
+        const eventTitle = c.cleanTitle ?? text;
         let eventLink = "";
         let capturedEventId = "";
         try {
           const calResult = await createCalendarEvent({
-            title: text,
+            title: eventTitle,
             description: `Added via DynoSOAR.\n\nOriginal entry: "${text}"`,
             start_date_time: startIso,
             end_date_time: endIso,
@@ -242,7 +247,7 @@ export async function registerRoutes(
           eventLink = "";
         }
         await appendRow(TABS.EVENTS, [
-          text,
+          eventTitle,
           c.eventDate,
           c.startTime,
           c.endTime,
@@ -293,8 +298,11 @@ export async function registerRoutes(
           }
         }
         // Daily Routine tab columns: Time Block | Activity | Days | Type | Auto-add to Calendar? | Notes | Last Completed
+        // No explicit time given ("general", no clock time) — leave the
+        // time block blank so it shows as an any-time habit instead of a
+        // guessed default.
         await appendRow(TABS.ROUTINE, [
-          c.startTime ?? "",
+          c.hasExplicitTime ? (c.startTime ?? "") : "",
           text,
           c.cadenceLabel ?? "",
           c.category,
@@ -810,6 +818,34 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error("Shop purchase error:", err);
       res.status(500).json({ message: err.message || "Failed to purchase item" });
+    }
+  });
+
+  app.post("/api/shop/:row/equip", async (req, res) => {
+    try {
+      const row = Number(req.params.row);
+      if (!row) {
+        return res.status(400).json({ message: "row is required" });
+      }
+      const equip = req.body?.equip !== false;
+      const result = await equipShopItem(row, equip);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("Shop equip error:", err);
+      res.status(500).json({ message: err.message || "Failed to update equip state" });
+    }
+  });
+
+  app.get("/api/equipped", async (_req, res) => {
+    try {
+      const items = await getEquippedItems();
+      res.json({ items });
+    } catch (err: any) {
+      console.error("Equipped fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load equipped items" });
     }
   });
 

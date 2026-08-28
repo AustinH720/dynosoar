@@ -151,14 +151,35 @@ function RoutineForm({ form, setForm }: { form: FormState; setForm: (f: FormStat
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1.5">
-          <Label htmlFor="routine-time">Time</Label>
-          <Input
-            id="routine-time"
-            type="time"
-            value={form.timeBlock}
-            onChange={(e) => setForm({ ...form, timeBlock: e.target.value })}
-            data-testid="input-routine-time"
-          />
+          <div className="flex items-center justify-between">
+            <Label htmlFor="routine-time">Time</Label>
+            <button
+              type="button"
+              onClick={() =>
+                setForm({ ...form, timeBlock: form.timeBlock ? "" : "09:00" })
+              }
+              className={cn(
+                "text-xs font-medium",
+                !form.timeBlock ? "text-primary" : "text-muted-foreground hover:text-foreground",
+              )}
+              data-testid="button-routine-no-time"
+            >
+              {!form.timeBlock ? "Any time \u2713" : "Set a time \u2192"}
+            </button>
+          </div>
+          {form.timeBlock ? (
+            <Input
+              id="routine-time"
+              type="time"
+              value={form.timeBlock}
+              onChange={(e) => setForm({ ...form, timeBlock: e.target.value })}
+              data-testid="input-routine-time"
+            />
+          ) : (
+            <div className="h-9 flex items-center px-3 rounded-md border border-dashed border-border text-sm text-muted-foreground">
+              No specific time — general habit
+            </div>
+          )}
         </div>
         <div className="space-y-1.5">
           <Label htmlFor="routine-category">Category</Label>
@@ -366,10 +387,15 @@ export default function Routine() {
               <div className="flex-1 min-w-0">
                 <p className="leading-snug font-medium">{item.activity}</p>
                 <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                  {item.timeBlock && (
+                  {item.timeBlock ? (
                     <Badge variant="outline" className="gap-1">
                       <Clock className="h-3 w-3" />
                       {item.timeBlock}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="gap-1 text-muted-foreground">
+                      <Clock className="h-3 w-3" />
+                      Any time
                     </Badge>
                   )}
                   <Badge variant="secondary">{daysLabel(item.days)}</Badge>

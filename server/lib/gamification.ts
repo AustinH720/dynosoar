@@ -282,6 +282,47 @@ export async function awardXp(
 }
 
 // ---------- Shop ----------
+// Equip slots mirror how the accessory would actually sit on the companion:
+// only one item can occupy a given slot at a time, but different slots can
+// all be equipped together (e.g. a headband + glasses + a cape at once).
+// Furniture/collectible items have no slot — they're just "Owned" keepsakes.
+export type ItemSlot = "head" | "face" | "body" | "back" | "held";
+
+const SLOT_BY_ITEM: Record<string, ItemSlot> = {
+  "Warrior Headband": "head",
+  "Graduation Cap": "head",
+  "Fisherman's Hat": "head",
+  "Reading Glasses": "face",
+  "Wizard Robe": "body",
+  "Champion's Cape": "back",
+  "Resistance Bands": "held",
+  "Iron Dumbbell Charm": "held",
+  "Scholar's Notebook": "held",
+  "Tackle Box": "held",
+  "Basic Fishing Rod": "held",
+  "Golden Fishing Rod": "held",
+};
+
+// A single representative emoji per item — cheap, crisp at any size, and
+// needs no image pipeline. Doubles as the shop card's icon tile.
+export const ITEM_EMOJI: Record<string, string> = {
+  "Resistance Bands": "🏋️",
+  "Iron Dumbbell Charm": "💪",
+  "Warrior Headband": "⚔️",
+  "Home Gym Corner": "🏠",
+  "Champion's Cape": "🦸",
+  "Reading Glasses": "👓",
+  "Scholar's Notebook": "📔",
+  "Graduation Cap": "🎓",
+  "Study Desk": "🪑",
+  "Wizard Robe": "🧙",
+  "Basic Fishing Rod": "🎣",
+  "Tackle Box": "🧰",
+  "Fisherman's Hat": "👒",
+  "Aquarium Nook": "🐠",
+  "Golden Fishing Rod": "🎣",
+};
+
 export interface ShopItem {
   row: number;
   name: string;
@@ -293,6 +334,16 @@ export interface ShopItem {
   owned: boolean;
   unlocked: boolean;
   canAfford: boolean;
+  emoji: string;
+  slot: ItemSlot | null;
+  equipped: boolean;
+}
+
+export interface EquippedItem {
+  slot: ItemSlot;
+  name: string;
+  emoji: string;
+  skill: SkillId;
 }
 
 const SKILL_LABEL_TO_ID: Record<string, SkillId> = {
@@ -303,7 +354,7 @@ const SKILL_LABEL_TO_ID: Record<string, SkillId> = {
 
 export async function getShopItems(): Promise<{ items: ShopItem[]; coins: number; skills: SkillState[] }> {
   const [values, player] = await Promise.all([
-    getValues(TABS.SHOP, "A2:G200"),
+    getValues(TABS.SHOP, "A2:H200"),
     getPlayerState(),
   ]);
   const skillXpById: Record<SkillId, number> = {
@@ -316,14 +367,16 @@ export async function getShopItems(): Promise<{ items: ShopItem[]; coins: number
     .map((row, i) => ({ row: i + 2, cells: row }))
     .filter((r) => r.cells[0])
     .map((r) => {
+      const name = r.cells[0] ?? "";
       const skill = SKILL_LABEL_TO_ID[(r.cells[1] ?? "").toLowerCase()] ?? "strength";
       const xpRequired = Number(r.cells[3] ?? 0) || 0;
       const coinCost = Number(r.cells[4] ?? 0) || 0;
       const owned = (r.cells[6] ?? "").toString().toUpperCase() === "TRUE";
+      const equipped = owned && (r.cells[7] ?? "").toString().toUpperCase() === "TRUE";
       const unlocked = skillXpById[skill] >= xpRequired;
       return {
         row: r.row,
-        name: r.cells[0] ?? "",
+        name,
         skill,
         type: r.cells[2] ?? "",
         xpRequired,
@@ -332,6 +385,9 @@ export async function getShopItems(): Promise<{ items: ShopItem[]; coins: number
         owned,
         unlocked,
         canAfford: unlocked && !owned && player.coins >= coinCost,
+        emoji: ITEM_EMOJI[name] ?? "🎁",
+        slot: SLOT_BY_ITEM[name] ?? null,
+        equipped,
       };
     });
 
@@ -350,6 +406,33 @@ export async function purchaseShopItem(row: number): Promise<{ ok: boolean; mess
   const newCoins = coins - item.coinCost;
   await writePlayerSkillsAndCoins({ coins: newCoins });
   return { ok: true, coins: newCoins };
+}
+
+export async function equipShopItem(row: number, equip: boolean): Promise<{ ok: boolean; message?: string }> {
+  const { items } = await getShopItems();
+  const item = items.find((i) => i.row === row);
+  if (!item) return { ok: false, message: "Item not found" };
+  if (!item.owned) return { ok: false, message: "You don't own this item yet" };
+  if (!item.slot) return { ok: false, message: "This item can't be equipped" };
+
+  if (equip) {
+    // Only one item per slot — unequip whatever else is currently there.
+    const conflicting = items.filter((i) => i.slot === item.slot && i.equipped && i.row !== row);
+    for (const c of conflicting) {
+      await updateRow(TABS.SHOP, `H${c.row}`, ["FALSE"]);
+    }
+    await updateRow(TABS.SHOP, `H${row}`, ["TRUE"]);
+  } else {
+    await updateRow(TABS.SHOP, `H${row}`, ["FALSE"]);
+  }
+  return { ok: true };
+}
+
+export async function getEquippedItems(): Promise<EquippedItem[]> {
+  const { items } = await getShopItems();
+  return items
+    .filter((i) => i.equipped && i.slot)
+    .map((i) => ({ slot: i.slot as ItemSlot, name: i.name, emoji: i.emoji, skill: i.skill }));
 }
 
 // ---------- Recurring routine checklist ----------
