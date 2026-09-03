@@ -36,11 +36,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ProjectCombobox } from "@/components/ProjectCombobox";
+import { RoutineSection } from "@/components/RoutineSection";
 import { apiRequest } from "@/lib/queryClient";
 import { useXpPopup, type XpAward } from "@/components/XpPopup";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { CheckSquare, ChevronDown, Plus, FolderOpen, MoreVertical, Repeat, RefreshCw, Link2 } from "lucide-react";
+import { CheckSquare, ChevronDown, Plus, FolderOpen, MoreVertical, Repeat, RefreshCw } from "lucide-react";
 
 interface Task {
   row: number;
@@ -53,13 +54,6 @@ interface Task {
   dateAdded: string;
   project: string;
   todoistId?: string;
-}
-
-interface TodoistSyncResult {
-  ok: boolean;
-  pulled: { row: number; change: string }[];
-  pushed: { row: number; todoistId: string }[];
-  errors: { row: number; message: string }[];
 }
 
 const FILTERS = ["Active", "Completed", "All"] as const;
@@ -121,13 +115,8 @@ function TaskRow({
             </Badge>
           )}
           {t.todoistId && (
-            <Badge
-              variant="outline"
-              className="gap-1 text-muted-foreground"
-              data-testid={`badge-todoist-${t.row}`}
-              title="Linked to Todoist"
-            >
-              <Link2 className="h-3 w-3" />
+            <Badge variant="outline" className="gap-1" data-testid={`badge-todoist-${t.row}`}>
+              <RefreshCw className="h-3 w-3" />
               Todoist
             </Badge>
           )}
@@ -173,47 +162,16 @@ function useTaskToggle() {
       qc.invalidateQueries({ queryKey: ["/api/tasks"] });
       qc.invalidateQueries({ queryKey: ["/api/player"] });
       qc.invalidateQueries({ queryKey: ["/api/skills"] });
-      qc.invalidateQueries({ queryKey: ["/api/shop"] });
       showXp(data?.xp);
     },
   });
 }
 
-function useTodoistSync() {
-  const qc = useQueryClient();
-  const { toast } = useToast();
-  return useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/todoist/sync", {});
-      return res.json() as Promise<TodoistSyncResult>;
-    },
-    onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ["/api/tasks"] });
-      const pulledCount = data.pulled?.length ?? 0;
-      const pushedCount = data.pushed?.length ?? 0;
-      const errorCount = data.errors?.length ?? 0;
-      if (errorCount > 0) {
-        toast({
-          title: "Sync finished with errors",
-          description: `${pulledCount} pulled, ${pushedCount} pushed, ${errorCount} error(s)`,
-          variant: "destructive",
-        });
-      } else if (pulledCount === 0 && pushedCount === 0) {
-        toast({ title: "Already up to date", description: "Nothing to sync with Todoist" });
-      } else {
-        toast({
-          title: "Synced with Todoist",
-          description: `${pulledCount} updated from Todoist, ${pushedCount} pushed to Todoist`,
-        });
-      }
-    },
-    onError: (err: any) => {
-      toast({ title: "Sync failed", description: err?.message, variant: "destructive" });
-    },
-  });
-}
+const VIEWS = ["Tasks", "Routine"] as const;
+type View = (typeof VIEWS)[number];
 
 export default function Tasks() {
+  const [view, setView] = useState<View>("Tasks");
   const [filter, setFilter] = useState<Filter>("Active");
   const [addOpen, setAddOpen] = useState(false);
   const [newTask, setNewTask] = useState("");
@@ -236,7 +194,28 @@ export default function Tasks() {
   const { data, isLoading, isError } = useQuery<Task[]>({ queryKey: ["/api/tasks"] });
 
   const toggle = useTaskToggle();
-  const todoistSync = useTodoistSync();
+
+  const syncTodoist = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/todoist/sync", {});
+      return res.json();
+    },
+    onSuccess: (data: { pulled: number; completedFromTodoist: number; pushedCompletions: number }) => {
+      qc.invalidateQueries({ queryKey: ["/api/tasks"] });
+      qc.invalidateQueries({ queryKey: ["/api/player"] });
+      const parts: string[] = [];
+      if (data.pulled) parts.push(`${data.pulled} pulled in`);
+      if (data.completedFromTodoist) parts.push(`${data.completedFromTodoist} marked complete`);
+      if (data.pushedCompletions) parts.push(`${data.pushedCompletions} pushed to Todoist`);
+      toast({
+        title: "Todoist synced",
+        description: parts.length ? parts.join(", ") : "Everything's already in sync.",
+      });
+    },
+    onError: (err: any) => {
+      toast({ title: "Todoist sync failed", description: err?.message, variant: "destructive" });
+    },
+  });
 
   const createTask = useMutation({
     mutationFn: async () => {
@@ -277,7 +256,6 @@ export default function Tasks() {
       qc.invalidateQueries({ queryKey: ["/api/tasks"] });
       qc.invalidateQueries({ queryKey: ["/api/player"] });
       qc.invalidateQueries({ queryKey: ["/api/skills"] });
-      qc.invalidateQueries({ queryKey: ["/api/shop"] });
       setEditTask(null);
       toast({ title: "Task updated" });
     },
@@ -364,6 +342,24 @@ export default function Tasks() {
 
   return (
     <Layout title="Tasks">
+      <div className="grid grid-cols-2 gap-2 mb-4">
+        {VIEWS.map((v) => (
+          <Button
+            key={v}
+            variant={view === v ? "default" : "outline"}
+            onClick={() => setView(v)}
+            data-testid={`button-view-${v.toLowerCase()}`}
+          >
+            {v === "Routine" && <Repeat className="h-4 w-4 mr-1.5" />}
+            {v}
+          </Button>
+        ))}
+      </div>
+
+      {view === "Routine" ? (
+        <RoutineSection />
+      ) : (
+        <>
       <div className="flex items-center justify-between gap-2 mb-4">
         <div className="flex gap-2">
           {FILTERS.map((f) => (
@@ -380,83 +376,82 @@ export default function Tasks() {
         </div>
         <div className="flex items-center gap-2">
           <Button
-            size="icon"
+            size="sm"
             variant="outline"
-            className="rounded-full shrink-0"
-            onClick={() => todoistSync.mutate()}
-            disabled={todoistSync.isPending}
+            onClick={() => syncTodoist.mutate()}
+            disabled={syncTodoist.isPending}
             data-testid="button-sync-todoist"
-            title="Sync with Todoist"
           >
-            <RefreshCw className={cn("h-4 w-4", todoistSync.isPending && "animate-spin")} />
+            <RefreshCw className={cn("h-3.5 w-3.5 mr-1.5", syncTodoist.isPending && "animate-spin")} />
+            Sync Todoist
           </Button>
-          <Dialog open={addOpen} onOpenChange={setAddOpen}>
-            <DialogTrigger asChild>
-              <Button size="icon" className="rounded-full shrink-0" data-testid="button-add-task">
-                <Plus className="h-4 w-4" />
-              </Button>
-            </DialogTrigger>
-            <DialogContent data-testid="dialog-add-task">
-              <DialogHeader>
-                <DialogTitle>Add a task</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-3">
+        <Dialog open={addOpen} onOpenChange={setAddOpen}>
+          <DialogTrigger asChild>
+            <Button size="icon" className="rounded-full shrink-0" data-testid="button-add-task">
+              <Plus className="h-4 w-4" />
+            </Button>
+          </DialogTrigger>
+          <DialogContent data-testid="dialog-add-task">
+            <DialogHeader>
+              <DialogTitle>Add a task</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="new-task-text">Task</Label>
+                <Input
+                  id="new-task-text"
+                  value={newTask}
+                  onChange={(e) => setNewTask(e.target.value)}
+                  placeholder="Clean the fish tank glass"
+                  data-testid="input-new-task"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="new-task-project">Project (optional)</Label>
+                <ProjectCombobox
+                  value={newProject}
+                  onChange={setNewProject}
+                  options={existingProjects}
+                  placeholder="General"
+                  testId="input-new-task-project"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
-                  <Label htmlFor="new-task-text">Task</Label>
+                  <Label htmlFor="new-task-due">Due date (optional)</Label>
                   <Input
-                    id="new-task-text"
-                    value={newTask}
-                    onChange={(e) => setNewTask(e.target.value)}
-                    placeholder="Clean the fish tank glass"
-                    data-testid="input-new-task"
+                    id="new-task-due"
+                    type="date"
+                    value={newDueDate}
+                    onChange={(e) => setNewDueDate(e.target.value)}
+                    data-testid="input-new-task-due"
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="new-task-project">Project (optional)</Label>
-                  <ProjectCombobox
-                    value={newProject}
-                    onChange={setNewProject}
-                    options={existingProjects}
-                    placeholder="General"
-                    testId="input-new-task-project"
-                  />
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="new-task-due">Due date (optional)</Label>
-                    <Input
-                      id="new-task-due"
-                      type="date"
-                      value={newDueDate}
-                      onChange={(e) => setNewDueDate(e.target.value)}
-                      data-testid="input-new-task-due"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Priority</Label>
-                    <Select value={newPriority} onValueChange={setNewPriority}>
-                      <SelectTrigger data-testid="select-new-task-priority">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="Medium">Normal</SelectItem>
-                        <SelectItem value="High">High</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
+                  <Label>Priority</Label>
+                  <Select value={newPriority} onValueChange={setNewPriority}>
+                    <SelectTrigger data-testid="select-new-task-priority">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Medium">Normal</SelectItem>
+                      <SelectItem value="High">High</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
-              <DialogFooter>
-                <Button
-                  onClick={() => createTask.mutate()}
-                  disabled={!newTask.trim() || createTask.isPending}
-                  data-testid="button-save-new-task"
-                >
-                  Add task
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+            </div>
+            <DialogFooter>
+              <Button
+                onClick={() => createTask.mutate()}
+                disabled={!newTask.trim() || createTask.isPending}
+                data-testid="button-save-new-task"
+              >
+                Add task
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
         </div>
       </div>
 
@@ -613,6 +608,8 @@ export default function Tasks() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+        </>
+      )}
     </Layout>
   );
 }

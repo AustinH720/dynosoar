@@ -27,6 +27,9 @@ interface AnimatedCompanionProps {
   draggable?: boolean;
   /** Disable animation (e.g. respects a "reduce motion" user setting upstream). */
   animate?: boolean;
+  /** Optional click handler — makes the companion image an interactive button (e.g. open Focus). */
+  onClick?: () => void;
+  title?: string;
   /**
    * Optional eye-blink overlay position, as percentages of the image's
    * bounding box (0-100). Tune these per companion stage by eye — there's
@@ -45,6 +48,8 @@ export function AnimatedCompanion({
   draggable,
   animate = true,
   blinkOverlay,
+  onClick,
+  title,
 }: AnimatedCompanionProps) {
   // Unique id so multiple AnimatedCompanion instances on one page (unlikely,
   // but e.g. a Settings preview thumbnail alongside the Home hero) don't
@@ -80,6 +85,20 @@ export function AnimatedCompanion({
           style={{ display: "block" }}
           data-testid={testId}
           draggable={draggable}
+          onClick={onClick}
+          title={title}
+          role={onClick ? "button" : undefined}
+          tabIndex={onClick ? 0 : undefined}
+          onKeyDown={
+            onClick
+              ? (e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onClick();
+                  }
+                }
+              : undefined
+          }
         />
       </div>
       {animate && blinkOverlay && (

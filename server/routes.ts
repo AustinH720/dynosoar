@@ -2,12 +2,20 @@ import type { Express } from "express";
 import type { Server } from "node:http";
 import { getValues, appendRow, updateRow, clearRange, TABS, getSettings, updateSettings, normalizeTime } from "./lib/sheets.js";
 import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./lib/external.js";
-import { classify, classifyFromTodoist, classifyTodoistFailure, extractProject } from "./lib/classify.js";
+import { classify, classifyFromTodoist, extractProject, guessCategory } from "./lib/classify.js";
+import {
+  createTodoistTask,
+  completeTodoistTask,
+  reopenTodoistTask,
+  updateTodoistTask,
+  listOpenTodoistTasks,
+  isTodoistConfigured,
+  cadenceToDueString,
+  quickAddTodoistTask,
+  deleteTodoistTask,
+} from "./lib/todoist.js";
 import { toIsoWithTz, todayStr, todayWeekday, nowInAppTz } from "./lib/time.js";
 import { findRecentDuplicate } from "./lib/dedupe.js";
-import { quickAddTask, closeTask, reopenTask, isTodoistConfigured } from "./lib/todoist.js";
-import { runFullSync, type SheetTaskRow } from "./lib/todoist-sync.js";
-import { logFocusSession } from "./lib/focus.js";
 import {
   awardXp,
   getPlayerState,
@@ -22,11 +30,23 @@ import {
   updateRoutineItem,
   deleteRoutineItem,
   daysSetToLabel,
+  getFeedState,
+  feedCompanion,
+  getCheckinState,
+  doCheckIn,
+  planMyDay,
+  getMyDayItems,
+  type OpenTask,
+  getCompanionsState,
+  setActiveCompanionId,
+  logFocusSessionComplete,
+  countFocusSessionsToday,
+  FOCUS_WORK_MINUTES,
+  FOCUS_BREAK_MINUTES,
   getShopItems,
   purchaseShopItem,
   equipShopItem,
   getEquippedItems,
-  type OpenTask,
 } from "./lib/gamification.js";
 
 function rowsToObjects(values: string[][], startRow: number) {
@@ -60,10 +80,10 @@ async function mirrorTaskDueDateToCalendar(taskText: string, dueDate: string, to
     const endDate = new Date(2000, 0, 1, h, m + TASK_DUE_REMINDER_DURATION_MIN);
     const endTime = `${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}`;
     const endIso = toIsoWithTz(dueDate, endTime);
-    const title = `📝 Due: ${taskText}`;
+    const title = `\ud83d\udcdd Due: ${taskText}`;
     const calResult = await createCalendarEvent({
       title,
-      description: `Task reminder added via DynoSOAR.\n\nThis task is due today — check it off on the Tasks page once it's done.\n\nOriginal entry: "${taskText}"`,
+      description: `Task reminder added via DynoSOAR.\n\nThis task is due today \u2014 check it off on the Tasks page once it's done.\n\nOriginal entry: "${taskText}"`,
       start_date_time: startIso,
       end_date_time: endIso,
     });
@@ -84,34 +104,6 @@ async function mirrorTaskDueDateToCalendar(taskText: string, dueDate: string, to
     console.error("Task due-date calendar mirror failed:", e?.message);
     return "";
   }
-}
-
-// ---------- Todoist sync helpers (wire todoist-sync.ts's injectable deps to the real Sheet) ----------
-
-async function readAllTaskRows(): Promise<SheetTaskRow[]> {
-  const values = await getValues(TABS.TASKS, "A2:I2000");
-  return rowsToObjects(values, 2)
-    .filter((r) => r.cells[0])
-    .map((r) => ({
-      row: r.row,
-      task: r.cells[0] ?? "",
-      category: r.cells[1] ?? "",
-      dueDate: r.cells[2] ?? "",
-      priority: r.cells[3] ?? "Medium",
-      status: r.cells[4] ?? "Not Started",
-      source: r.cells[5] ?? "",
-      dateAdded: r.cells[6] ?? "",
-      project: r.cells[7] ?? "",
-      todoistId: r.cells[8] ?? "",
-    }));
-}
-
-async function writeTaskStatus(row: number, status: string): Promise<void> {
-  await updateRow(TABS.TASKS, `E${row}`, [status]);
-}
-
-async function writeTaskTodoistId(row: number, todoistId: string): Promise<void> {
-  await updateRow(TABS.TASKS, `I${row}`, [todoistId]);
 }
 
 export async function registerRoutes(
@@ -151,11 +143,7 @@ export async function registerRoutes(
           await updateRow(TABS.TASKS, `E${match.row}`, ["Completed"]);
           const matchedTask = openTasks.find((t) => t.row === match.row);
           if (matchedTask?.todoistId) {
-            try {
-              await closeTask(matchedTask.todoistId);
-            } catch (e: any) {
-              console.error("Todoist close (via completion phrase) failed:", e?.message);
-            }
+            completeTodoistTask(matchedTask.todoistId).catch(() => {});
           }
           xpResult = await awardXp(
             "task_completed",
@@ -236,25 +224,13 @@ export async function registerRoutes(
       }
 
       const { project, rest } = extractProject(text);
-
-      // ---- Todoist-first classification ----
-      // Send the (project-stripped) capture text to Todoist's Quick Add so
-      // its own NLP decides dates/times/recurrence/#project/@label/p1-p4
-      // syntax. classifyFromTodoist() maps the result onto DynoSOAR's
-      // Task/Event/Recurring/Note buckets. If the Quick Add call itself
-      // fails (network error, Todoist outage, timeout), classifyTodoistFailure()
-      // saves a plain no-date Task flagged for manual fix rather than
-      // blocking the capture or silently reverting to full local parsing.
-      let c: ReturnType<typeof classify>;
-      let todoistFailed = false;
-      try {
-        const todoistResult = await quickAddTask(project ? rest : text);
-        c = classifyFromTodoist(todoistResult, project ? rest : text, now);
-      } catch (e: any) {
-        console.error("Todoist Quick Add failed, falling back to manual-fix Task:", e?.message);
-        c = classifyTodoistFailure(project ? rest : text);
-        todoistFailed = true;
-      }
+      // Hand the raw entry to Todoist's own Quick Add parser first — it does
+      // the date/time/recurrence extraction (and creates the Todoist task in
+      // the same call). Only when that's unavailable (sandbox preview, no
+      // TODOIST_API_TOKEN, or the call failed) do we fall back to the local
+      // chrono-node classifier exactly as before.
+      const quick = await quickAddTodoistTask(rest);
+      const c = quick ? classifyFromTodoist(rest, quick, now) : classify(rest, now);
 
       // A project-tagged entry with no clear date/action defaults to a Task
       // (e.g. "Fish: water change" reads as a Note otherwise).
@@ -279,7 +255,7 @@ export async function registerRoutes(
       }
 
       let summary = "";
-      let detail: Record<string, any> = { type: c.type, todoistFallback: c.todoistFallback ?? false };
+      let detail: Record<string, any> = { type: c.type };
 
       if (c.type === "Event") {
         const startIso = toIsoWithTz(c.eventDate!, c.startTime!);
@@ -303,6 +279,13 @@ export async function registerRoutes(
           console.error("Calendar create failed:", e?.message);
           eventLink = "";
         }
+        // One-way: also drop it into Todoist so timed items show up there too.
+        // The Events tab has no linkage column, so we don't store/track the id.
+        // Todoist's Quick Add parser already created this task (with the date
+        // it detected) when `quick` is set, so skip creating a second one.
+        if (!quick) {
+          createTodoistTask({ content: eventTitle, dueDatetime: startIso, priority: "Medium" }).catch(() => {});
+        }
         await appendRow(TABS.EVENTS, [
           eventTitle,
           c.eventDate,
@@ -317,7 +300,14 @@ export async function registerRoutes(
         summary = `Event scheduled for ${c.eventDate} at ${c.startTime}`;
         detail = { ...detail, date: c.eventDate, startTime: c.startTime, endTime: c.endTime, eventLink };
       } else if (c.type === "Task") {
-        const taskText = project ? rest : text;
+        const taskText = c.cleanTitle ?? (project ? rest : text);
+        const todoistRef = quick
+          ? { id: quick.todoistId }
+          : await createTodoistTask({
+              content: taskText,
+              dueDate: c.dueDate ?? null,
+              priority: c.priority,
+            });
         await appendRow(TABS.TASKS, [
           taskText,
           c.category,
@@ -327,18 +317,15 @@ export async function registerRoutes(
           "App capture",
           today,
           project ?? "",
-          c.todoistId ?? "",
+          todoistRef?.id ?? "",
         ]);
         let calendarLink = "";
         if (c.dueDate) {
           calendarLink = await mirrorTaskDueDateToCalendar(taskText, c.dueDate, today);
         }
         summary = c.dueDate
-          ? `Task added, due ${c.dueDate} (${c.priority} priority)${calendarLink ? " — also added to your calendar" : ""}`
+          ? `Task added, due ${c.dueDate} (${c.priority} priority)${calendarLink ? " \u2014 also added to your calendar" : ""}`
           : `Task added (${c.priority} priority)`;
-        if (todoistFailed) {
-          summary += " — Todoist parsing failed, flagged for manual fix";
-        }
         detail = { ...detail, dueDate: c.dueDate, priority: c.priority, category: c.category, project, calendarLink };
       } else if (c.type === "Recurring") {
         let eventLink = "";
@@ -374,7 +361,19 @@ export async function registerRoutes(
         // Also surface it on the Tasks list, grouped under a dedicated
         // "Recurring" project so it's visible without hunting through the
         // routine checklist. Due date is the next occurrence; the calendar
-        // series itself repeats independently.
+        // series itself repeats independently. The linked Todoist task uses
+        // Todoist's own recurrence engine (via dueString) so it keeps
+        // auto-advancing there too, independent of our own rrule/calendar copy.
+        // Todoist's Quick Add already created (and recurred) the task itself
+        // when `quick` is set; only build our own recurrence phrase and
+        // create a task here on the local-classifier fallback path.
+        const todoistRecurringRef = quick
+          ? { id: quick.todoistId }
+          : await createTodoistTask({
+              content: text,
+              dueString: cadenceToDueString(c.cadenceLabel ?? "", c.rrule ?? undefined, c.hasExplicitTime ? c.startTime ?? undefined : undefined),
+              priority: "Medium",
+            });
         await appendRow(TABS.TASKS, [
           text,
           c.category,
@@ -384,13 +383,19 @@ export async function registerRoutes(
           "App capture (recurring)",
           today,
           "🔁 Recurring",
-          c.todoistId ?? "",
+          todoistRecurringRef?.id ?? "",
         ]);
         summary = eventLink
           ? `Recurring — added to Tasks (due ${c.eventDate}) and scheduled on calendar (${c.cadenceLabel})`
           : `Recurring — added to Tasks (due ${c.eventDate}); calendar scheduling failed`;
         detail = { ...detail, cadenceLabel: c.cadenceLabel, dueDate: c.eventDate, eventLink };
       } else {
+        // Todoist's Quick Add has no "note" concept — if `quick` ran, it
+        // already created a real (date-less) Todoist task before we decided
+        // this entry is really just a note. Clean that stray task up.
+        if (quick) {
+          deleteTodoistTask(quick.todoistId).catch(() => {});
+        }
         await appendRow(TABS.NOTES, [today, project ? rest : text, c.category ?? "", "", project ?? "", ""]);
         summary = "Saved as a note";
         detail = { ...detail, category: c.category, project };
@@ -457,9 +462,18 @@ export async function registerRoutes(
         return res.status(400).json({ message: "task is required" });
       }
       const today = todayStr();
-      // Tasks created directly (not through capture) have no Todoist id yet
-      // — the "Sync Todoist" button's push phase will pick them up.
-      await appendRow(TABS.TASKS, [task, category, dueDate, priority, "Not Started", "App capture", today, project, ""]);
+      const todoistRef = await createTodoistTask({ content: task, dueDate: dueDate || null, priority });
+      await appendRow(TABS.TASKS, [
+        task,
+        category,
+        dueDate,
+        priority,
+        "Not Started",
+        "App capture",
+        today,
+        project,
+        todoistRef?.id ?? "",
+      ]);
       const calendarLink = dueDate ? await mirrorTaskDueDateToCalendar(task, dueDate, today) : "";
       const xpResult = await awardXp("task_added", task, category, project);
       await appendRow(TABS.INBOX, [
@@ -504,68 +518,30 @@ export async function registerRoutes(
           ? "High"
           : "Medium"
         : prev[3] ?? "Medium";
-      const prevStatus = prev[4] || "Not Started";
-      const nextStatus = status || prevStatus;
+      const nextStatus = status || prev[4] || "Not Started";
       const taskProject = prev[7] ?? "";
       const todoistId = prev[8] ?? "";
 
       await updateRow(TABS.TASKS, `A${row}:E${row}`, [taskText, taskCategory, dueDate, priority, nextStatus]);
 
-      // Keep Todoist in sync when completion state changes here (checkbox on
-      // the Tasks page or Home's Today list). One-way: DynoSOAR -> Todoist.
-      if (todoistId && nextStatus !== prevStatus) {
-        try {
-          if (nextStatus === "Completed") {
-            await closeTask(todoistId);
-          } else if (prevStatus === "Completed") {
-            await reopenTask(todoistId);
-          }
-        } catch (e: any) {
-          console.error(`Todoist status sync failed for row ${row} (id ${todoistId}):`, e?.message);
-          // Don't fail the request — the Sheet is still the local source of
-          // truth, and the next "Sync Todoist" pull will reconcile if needed.
-        }
-      }
-
       let xpResult: Awaited<ReturnType<typeof awardXp>> | null = null;
-      if (nextStatus === "Completed" && prevStatus !== "Completed") {
+      if (nextStatus === "Completed" && prev[4] !== "Completed") {
         xpResult = await awardXp("task_completed", taskText || `Task row ${row}`, taskCategory, taskProject);
+        if (todoistId) completeTodoistTask(todoistId).catch(() => {});
+      } else if (nextStatus !== "Completed" && prev[4] === "Completed" && todoistId) {
+        reopenTodoistTask(todoistId).catch(() => {});
+      } else if (todoistId && (hasField("task") || hasField("dueDate") || hasField("priority"))) {
+        updateTodoistTask(todoistId, {
+          content: hasField("task") ? taskText : undefined,
+          dueDate: hasField("dueDate") ? dueDate : undefined,
+          priority: hasField("priority") ? (priority as "High" | "Medium") : undefined,
+        }).catch(() => {});
       }
 
       res.json({ ok: true, xp: xpResult });
     } catch (err: any) {
       console.error("Task update error:", err);
       res.status(500).json({ message: err.message || "Failed to update task" });
-    }
-  });
-
-  // ---------- Focus timer ----------
-  app.post("/api/focus/complete", async (req, res) => {
-    try {
-      const durationMinutes = Number(req.body?.durationMinutes);
-      const completed = req.body?.completed === true;
-      const taskRow = req.body?.taskRow ? Number(req.body.taskRow) : undefined;
-      if (!durationMinutes || durationMinutes < 0) {
-        return res.status(400).json({ message: "durationMinutes is required" });
-      }
-      let taskText: string | undefined;
-      let linkedTaskCompletedInSession = false;
-      if (taskRow) {
-        const prevValues = await getValues(TABS.TASKS, `A${taskRow}:E${taskRow}`);
-        taskText = prevValues[0]?.[0] ?? undefined;
-        linkedTaskCompletedInSession = prevValues[0]?.[4] === "Completed";
-      }
-      const result = await logFocusSession({
-        durationMinutes,
-        completed,
-        taskRow,
-        taskText,
-        linkedTaskCompletedInSession,
-      });
-      res.json({ ok: true, xp: result.xp });
-    } catch (err: any) {
-      console.error("Focus session log error:", err);
-      res.status(500).json({ message: err.message || "Failed to log focus session" });
     }
   });
 
@@ -576,15 +552,60 @@ export async function registerRoutes(
 
   app.post("/api/todoist/sync", async (_req, res) => {
     try {
-      const result = await runFullSync({
-        getAllTasks: readAllTaskRows,
-        updateTaskStatus: writeTaskStatus,
-        updateTaskTodoistId: writeTaskTodoistId,
-      });
-      res.json({ ok: true, ...result });
+      const openTodoist = await listOpenTodoistTasks();
+      const openIds = new Set(openTodoist.map((t) => t.id));
+
+      const values = await getValues(TABS.TASKS, "A2:I2000");
+      const rows = rowsToObjects(values, 2).filter((r) => r.cells[0]);
+
+      let pulled = 0;
+      let completedFromTodoist = 0;
+      let pushedCompletions = 0;
+      const linkedIds = new Set<string>();
+
+      for (const r of rows) {
+        const todoistId = r.cells[8] || "";
+        const status = r.cells[4] || "Not Started";
+        if (!todoistId) continue;
+        linkedIds.add(todoistId);
+        // Todoist no longer lists it as open -> mark it completed here too.
+        // (We can't cheaply distinguish "completed" from "deleted" without an
+        // extra per-task lookup, so both collapse to Completed — a known,
+        // acceptable trade-off.)
+        if (status !== "Completed" && !openIds.has(todoistId)) {
+          await updateRow(TABS.TASKS, `E${r.row}`, ["Completed"]);
+          await awardXp("task_completed", r.cells[0] || `Task row ${r.row}`, r.cells[1] || "", r.cells[7] || "");
+          completedFromTodoist++;
+        } else if (status === "Completed" && openIds.has(todoistId)) {
+          // Completed locally (e.g. via Home quick-complete) but still open in
+          // Todoist -> push the completion there.
+          await completeTodoistTask(todoistId);
+          pushedCompletions++;
+        }
+      }
+
+      // Any open Todoist task with no linked Sheet row (created directly in
+      // Todoist or one of its apps) gets pulled in as a new Task row.
+      for (const t of openTodoist) {
+        if (linkedIds.has(t.id)) continue;
+        await appendRow(TABS.TASKS, [
+          t.content,
+          guessCategory(t.content),
+          t.dueDate || "",
+          t.priority,
+          "Not Started",
+          "Todoist",
+          todayStr(),
+          "",
+          t.id,
+        ]);
+        pulled++;
+      }
+
+      res.json({ ok: true, pulled, completedFromTodoist, pushedCompletions });
     } catch (err: any) {
       console.error("Todoist sync error:", err);
-      res.status(500).json({ message: err.message || "Failed to sync with Todoist" });
+      res.status(500).json({ message: err.message || "Todoist sync failed" });
     }
   });
 
@@ -918,7 +939,7 @@ export async function registerRoutes(
   app.get("/api/skills", async (_req, res) => {
     try {
       const player = await getPlayerState();
-      res.json({ coins: player.coins, skills: player.skills, hunger: player.hunger });
+      res.json({ coins: player.coins, skills: player.skills });
     } catch (err: any) {
       console.error("Skills fetch error:", err);
       res.status(500).json({ message: err.message || "Failed to load skills" });
@@ -981,12 +1002,133 @@ export async function registerRoutes(
     }
   });
 
+  // ---------- Daily check-in (presence-based health, visual only) ----------
+  app.get("/api/checkin", async (_req, res) => {
+    try {
+      const state = await getCheckinState();
+      res.json(state);
+    } catch (err: any) {
+      console.error("Check-in fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load check-in state" });
+    }
+  });
+
+  app.post("/api/checkin", async (_req, res) => {
+    try {
+      const result = await doCheckIn();
+      res.json(result);
+    } catch (err: any) {
+      console.error("Check-in error:", err);
+      res.status(500).json({ message: err.message || "Failed to check in" });
+    }
+  });
+
+  // ---------- Feed ----------
+  app.get("/api/feed", async (_req, res) => {
+    try {
+      const feed = await getFeedState();
+      res.json(feed);
+    } catch (err: any) {
+      console.error("Feed fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load feed" });
+    }
+  });
+
+  app.post("/api/feed/:itemId", async (req, res) => {
+    try {
+      const itemId = String(req.params.itemId ?? "");
+      const result = await feedCompanion(itemId);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("Feed error:", err);
+      res.status(500).json({ message: err.message || "Failed to feed companion" });
+    }
+  });
+
+  // ---------- My Day (voice-planned daily checklist) ----------
+  app.get("/api/myday", async (_req, res) => {
+    try {
+      const items = await getMyDayItems();
+      res.json({ items });
+    } catch (err: any) {
+      console.error("My Day fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load My Day" });
+    }
+  });
+
+  app.post("/api/myday/plan", async (req, res) => {
+    try {
+      const items = Array.isArray(req.body?.items) ? req.body.items.map((i: any) => String(i ?? "")) : [];
+      const filtered = items.filter((i: string) => i.trim());
+      if (filtered.length === 0) {
+        return res.status(400).json({ message: "At least one item is required" });
+      }
+      const result = await planMyDay(filtered);
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      console.error("My Day plan error:", err);
+      res.status(500).json({ message: err.message || "Failed to plan your day" });
+    }
+  });
+
+  // ---------- Companions ----------
+  // ---------- Focus (Pomodoro) ----------
+  app.get("/api/focus", async (_req, res) => {
+    try {
+      const sessionsToday = await countFocusSessionsToday();
+      res.json({ workMinutes: FOCUS_WORK_MINUTES, breakMinutes: FOCUS_BREAK_MINUTES, sessionsToday });
+    } catch (err: any) {
+      console.error("Focus fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load focus state" });
+    }
+  });
+
+  app.post("/api/focus/complete", async (_req, res) => {
+    try {
+      const result = await logFocusSessionComplete(FOCUS_WORK_MINUTES);
+      res.json(result);
+    } catch (err: any) {
+      console.error("Focus complete error:", err);
+      res.status(500).json({ message: err.message || "Failed to log focus session" });
+    }
+  });
+
+  app.get("/api/companions", async (_req, res) => {
+    try {
+      const state = await getCompanionsState();
+      res.json(state);
+    } catch (err: any) {
+      console.error("Companions fetch error:", err);
+      res.status(500).json({ message: err.message || "Failed to load companions" });
+    }
+  });
+
+  app.post("/api/companions/active", async (req, res) => {
+    try {
+      const id = String(req.body?.id ?? "");
+      if (!id) {
+        return res.status(400).json({ message: "id is required" });
+      }
+      const result = await setActiveCompanionId(id);
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("Companion select error:", err);
+      res.status(500).json({ message: err.message || "Failed to switch companion" });
+    }
+  });
+
   // ---------- Today snapshot ----------
   app.get("/api/today", async (_req, res) => {
     try {
       const today = todayStr();
       const [taskValues, eventValues] = await Promise.all([
-        getValues(TABS.TASKS, "A2:I2000"),
+        getValues(TABS.TASKS, "A2:G2000"),
         getValues(TABS.EVENTS, "A2:H2000"),
       ]);
 

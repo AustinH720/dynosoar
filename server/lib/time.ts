@@ -20,6 +20,34 @@ export function toIsoWithTz(dateStr: string, timeStr: string): string {
   return `${dateStr}T${paddedTime}:00${offset}`;
 }
 
+/**
+ * Converts a UTC ISO datetime (e.g. Todoist's `due.datetime`, always returned
+ * in UTC) into America/Toronto wall-clock date + time parts. Used when a
+ * Todoist Quick Add response supplies the due date/time instead of our own
+ * chrono-node parsing, so calendar events land on the correct local hour.
+ */
+export function utcIsoToAppTzParts(iso: string): { date: string; time: string } {
+  const d = new Date(iso);
+  const dateFmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const timeFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TZ,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const date = dateFmt.format(d);
+  const parts = timeFmt.formatToParts(d);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "00";
+  let hour = get("hour");
+  if (hour === "24") hour = "00";
+  return { date, time: `${hour}:${get("minute")}` };
+}
+
 export function todayStr(): string {
   const now = new Date();
   const fmt = new Intl.DateTimeFormat("en-CA", {

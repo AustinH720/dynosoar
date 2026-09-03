@@ -1,252 +1,304 @@
-// server/lib/todoist.ts
+// Todoist integration.
 //
-// Thin client for the Todoist REST API (v1), used for:
-//   1. Quick Add on capture — sends raw capture text and lets Todoist's own
-//      NLP parse dates/times/recurrence/#project/@label/p1-p4 syntax.
-//   2. Closing a task in Todoist when it's completed in the app.
-//   3. Pull sync — listing open Todoist tasks to reconcile against the Sheet.
+// Dual-path, mirroring the existing useServiceAccount pattern in sheets.ts
+// and external.ts:
+//   - Production (Vercel): TODOIST_API_TOKEN env var is set -> call the
+//     official Todoist REST API directly with a Bearer token.
+//   - Sandbox/dev preview: no token set -> fall back to the connected
+//     Todoist integration available in this chat session, via the same
+//     callExternalTool("todoist", ...) helper already used for Calendar.
 //
-// Auth: TODOIST_API_TOKEN env var (user's personal API token, same pattern
-// as GOOGLE_SERVICE_ACCOUNT_KEY — set in Vercel for production).
-//
-// Sandbox/local-dev fallback: when no token is present, every function
-// returns a deterministic MOCK response instead of throwing or hitting the
-// network. This lets the capture/classify/sync logic be exercised and
-// tested without a real Todoist account. Mock responses are clearly marked
-// (`__mock: true`) so calling code / logs can tell the difference, and
-// callers should treat mock mode as "not really configured" for anything
-// user-facing (e.g. the Settings page connection status).
+// Every function fails soft (returns null/false/[] and logs) so a Todoist
+// hiccup never breaks task capture, editing, or the app in general.
 
-const TODOIST_API_BASE = "https://api.todoist.com/api/v1";
+import { callExternalTool } from "./external.js";
 
-function getToken(): string | null {
-  return process.env.TODOIST_API_TOKEN || null;
-}
+const TODOIST_TOKEN = process.env.TODOIST_API_TOKEN;
+const useDirectApi = !!TODOIST_TOKEN;
+const API_BASE = "https://api.todoist.com/api/v1";
 
 export function isTodoistConfigured(): boolean {
-  return !!getToken();
+  return useDirectApi;
 }
 
-export interface TodoistDue {
-  date: string; // YYYY-MM-DD
-  datetime?: string | null; // ISO 8601, present only if a specific time was parsed
-  string: string; // human-readable, e.g. "every day", "tomorrow at 5pm"
-  timezone?: string | null;
-  is_recurring: boolean;
-}
-
-export interface TodoistTask {
+export interface TodoistTaskRef {
   id: string;
   content: string;
-  description?: string;
-  is_completed: boolean;
-  due: TodoistDue | null;
-  priority: number; // 1 (normal) - 4 (urgent)
-  project_id?: string;
-  labels?: string[];
-  url?: string;
-  __mock?: boolean;
+  dueDate: string; // YYYY-MM-DD, "" if none
+  isRecurring: boolean;
+  priority: "High" | "Medium";
 }
 
-interface TodoistError extends Error {
-  status?: number;
+export interface CreateTodoistTaskOpts {
+  content: string;
+  dueDate?: string | null; // exact YYYY-MM-DD
+  dueDatetime?: string | null; // exact ISO 8601 datetime (with offset)
+  dueString?: string | null; // natural language — used for recurring cadence
+  priority?: "High" | "Medium";
 }
 
-async function todoistFetch(path: string, init: RequestInit = {}): Promise<any> {
-  const token = getToken();
-  if (!token) {
-    throw Object.assign(new Error("TODOIST_API_TOKEN not configured"), { status: 401 }) as TodoistError;
-  }
-  const res = await fetch(`${TODOIST_API_BASE}${path}`, {
-    ...init,
+// Todoist's REST priority is an integer 1 (normal/default, shown as "P4" in
+// the UI) to 4 (urgent, shown as "P1"). Our app only has two tiers, so High
+// maps to "high" (3 / p2) and Medium maps to Todoist's own default (1 / p4).
+function toApiPriority(level: "High" | "Medium"): number {
+  return level === "High" ? 3 : 1;
+}
+function toConnectorPriority(level: "High" | "Medium"): "p2" | "p4" {
+  return level === "High" ? "p2" : "p4";
+}
+function fromApiPriority(p?: number): "High" | "Medium" {
+  return (p ?? 1) >= 3 ? "High" : "Medium";
+}
+function fromConnectorPriority(p?: string): "High" | "Medium" {
+  return p === "p1" || p === "p2" ? "High" : "Medium";
+}
+
+async function directRequest(path: string, method: string, body?: Record<string, any>): Promise<any> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
     headers: {
-      Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
-      ...(init.headers || {}),
+      Authorization: `Bearer ${TODOIST_TOKEN}`,
     },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    const err = new Error(`Todoist API ${res.status}: ${body || res.statusText}`) as TodoistError;
-    err.status = res.status;
-    throw err;
+    const text = await res.text().catch(() => "");
+    throw new Error(`Todoist ${method} ${path} -> ${res.status}: ${text}`);
   }
   if (res.status === 204) return null;
-  return res.json();
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
-// ---------- Mock helpers (used only when no token is configured) ----------
-
-let mockIdCounter = 1;
-function mockId(): string {
-  return `mock-${Date.now()}-${mockIdCounter++}`;
+// The connector's add-tasks tool only accepts a natural-language dueString,
+// not a raw ISO datetime. Todoist's own parser reliably reads a loose
+// "YYYY-MM-DD HH:mm" phrase, so strip the offset/"T" separator for that path.
+function isoToLooseDateTimeString(iso: string): string {
+  const m = iso.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+  return m ? `${m[1]} ${m[2]}` : iso;
 }
 
-// Very small stand-in for Todoist's NLP, used only in mock mode so the rest
-// of the pipeline (classifyFromTodoist, routes) can be exercised locally.
-// This is NOT meant to replicate Todoist's real parser — it's a fixture.
-function mockParseDue(text: string): TodoistDue | null {
-  const lower = text.toLowerCase();
-  const recurringMatch = /\bevery day\b|\bdaily\b|\bevery (mon|tues|wednes|thurs|fri|satur|sun)day\b|\bevery week\b|\bweekdays\b|\bweekends\b/.exec(
-    lower,
-  );
-  if (recurringMatch) {
-    return {
-      date: new Date().toISOString().slice(0, 10),
-      string: recurringMatch[0],
-      is_recurring: true,
-    };
-  }
-  const timeMatch = /\bat (\d{1,2})(:\d{2})?\s*(am|pm)\b/.exec(lower);
-  if (timeMatch) {
-    const now = new Date();
-    return {
-      date: now.toISOString().slice(0, 10),
-      datetime: now.toISOString(),
-      string: timeMatch[0],
-      is_recurring: false,
-    };
-  }
-  const dateWords = /\btomorrow\b|\btoday\b|\bnext week\b|\bmonday\b|\btuesday\b|\bwednesday\b|\bthursday\b|\bfriday\b|\bsaturday\b|\bsunday\b/.exec(
-    lower,
-  );
-  if (dateWords) {
-    return {
-      date: new Date().toISOString().slice(0, 10),
-      string: dateWords[0],
-      is_recurring: false,
-    };
-  }
-  return null;
-}
-
-// ---------- Public API ----------
-
-/**
- * Sends raw capture text to Todoist's Quick Add endpoint. Todoist parses
- * #Project, @label, p1-p4, and natural-language dates/times/recurrence out
- * of the text itself. `meta: true` asks for the parsed breakdown back.
- *
- * In mock mode (no TODOIST_API_TOKEN), returns a locally-fabricated
- * approximation so callers can be tested without a real account.
- */
-export async function quickAddTask(text: string): Promise<TodoistTask> {
-  if (!isTodoistConfigured()) {
-    return {
-      id: mockId(),
-      content: text,
-      is_completed: false,
-      due: mockParseDue(text),
-      priority: 1,
-      __mock: true,
-    };
-  }
-  const data = await todoistFetch("/tasks/quick", {
-    method: "POST",
-    body: JSON.stringify({ text, meta: true }),
-  });
-  // v1 quick-add returns either the task directly or { ...task, meta: {...} }
-  // depending on API version; normalize to TodoistTask shape.
+function normalizeApiTask(t: any): TodoistTaskRef {
   return {
-    id: String(data.id),
-    content: data.content,
-    description: data.description,
-    is_completed: !!(data.is_completed ?? data.checked),
-    due: data.due ?? null,
-    priority: data.priority ?? 1,
-    project_id: data.project_id,
-    labels: data.labels,
-    url: data.url,
-  };
-}
-
-/** Marks a Todoist task complete (closed). No-op (logged) in mock mode. */
-export async function closeTask(todoistId: string): Promise<{ ok: boolean; mock?: boolean }> {
-  if (!isTodoistConfigured()) {
-    console.log(`[todoist mock] would close task ${todoistId}`);
-    return { ok: true, mock: true };
-  }
-  await todoistFetch(`/tasks/${todoistId}/close`, { method: "POST" });
-  return { ok: true };
-}
-
-/** Reopens a Todoist task (used if a completion is undone in the app). */
-export async function reopenTask(todoistId: string): Promise<{ ok: boolean; mock?: boolean }> {
-  if (!isTodoistConfigured()) {
-    console.log(`[todoist mock] would reopen task ${todoistId}`);
-    return { ok: true, mock: true };
-  }
-  await todoistFetch(`/tasks/${todoistId}/reopen`, { method: "POST" });
-  return { ok: true };
-}
-
-/** Creates a new Todoist task directly (used for push-sync of local-only tasks). */
-export async function createTask(content: string, dueDate?: string | null): Promise<TodoistTask> {
-  if (!isTodoistConfigured()) {
-    return {
-      id: mockId(),
-      content,
-      is_completed: false,
-      due: dueDate ? { date: dueDate, string: dueDate, is_recurring: false } : null,
-      priority: 1,
-      __mock: true,
-    };
-  }
-  const data = await todoistFetch("/tasks", {
-    method: "POST",
-    body: JSON.stringify({ content, due_date: dueDate || undefined }),
-  });
-  return {
-    id: String(data.id),
-    content: data.content,
-    is_completed: false,
-    due: data.due ?? null,
-    priority: data.priority ?? 1,
-  };
-}
-
-/** Lists active (not completed) Todoist tasks — used for pull-sync. */
-export async function listActiveTasks(): Promise<TodoistTask[]> {
-  if (!isTodoistConfigured()) {
-    console.log("[todoist mock] listActiveTasks called with no token — returning empty list");
-    return [];
-  }
-  const data = await todoistFetch("/tasks");
-  const results = Array.isArray(data) ? data : data.results || [];
-  return results.map((t: any) => ({
     id: String(t.id),
-    content: t.content,
-    is_completed: !!t.is_completed,
-    due: t.due ?? null,
-    priority: t.priority ?? 1,
-    project_id: t.project_id,
-    labels: t.labels,
-    url: t.url,
-  }));
+    content: t.content ?? "",
+    dueDate: t.due?.date ?? "",
+    isRecurring: !!t.due?.is_recurring,
+    priority: fromApiPriority(t.priority),
+  };
+}
+function normalizeConnectorTask(t: any): TodoistTaskRef {
+  return {
+    id: String(t.id),
+    content: t.content ?? "",
+    dueDate: (t.dueDate ?? "").slice(0, 10),
+    isRecurring: !!t.recurring,
+    priority: fromConnectorPriority(t.priority),
+  };
 }
 
-/**
- * Fetches a single task by id, used during pull-sync to check whether a
- * Todoist-linked task has been completed on the Todoist side. Returns null
- * if the task no longer exists (e.g. deleted in Todoist) rather than
- * throwing, since that's an expected/recoverable state during sync.
- */
-export async function getTask(todoistId: string): Promise<TodoistTask | null> {
-  if (!isTodoistConfigured()) {
-    console.log(`[todoist mock] getTask(${todoistId}) — no token, returning null`);
+/** Build a Todoist-parseable recurrence phrase from our own classify() output,
+ *  so Todoist's own recurrence engine (auto-advancing due dates, its mobile
+ *  app, etc.) owns the cadence going forward. */
+export function cadenceToDueString(cadenceLabel: string, rrule?: string, startTime?: string): string {
+  const DAY_NAMES: Record<string, string> = {
+    MO: "monday",
+    TU: "tuesday",
+    WE: "wednesday",
+    TH: "thursday",
+    FR: "friday",
+    SA: "saturday",
+    SU: "sunday",
+  };
+  let phrase = "every week";
+  const dayMatch = rrule?.match(/BYDAY=([A-Z]{2})(?:;|$)/);
+  if (dayMatch && DAY_NAMES[dayMatch[1]] && !/,/.test(rrule?.split("BYDAY=")[1] ?? "")) {
+    phrase = `every ${DAY_NAMES[dayMatch[1]]}`;
+  } else if (/daily/i.test(cadenceLabel)) {
+    phrase = "every day";
+  } else if (/weekday/i.test(cadenceLabel)) {
+    phrase = "every weekday";
+  } else if (/weekend/i.test(cadenceLabel)) {
+    phrase = "every sat, sun";
+  } else if (/monthly/i.test(cadenceLabel)) {
+    phrase = "every month";
+  } else if (/weekly/i.test(cadenceLabel)) {
+    phrase = "every week";
+  }
+  if (startTime) {
+    const [h, m] = startTime.split(":").map((n) => parseInt(n, 10));
+    if (!Number.isNaN(h)) {
+      const period = h >= 12 ? "pm" : "am";
+      const h12 = h % 12 === 0 ? 12 : h % 12;
+      phrase += ` at ${h12}${m ? ":" + String(m).padStart(2, "0") : ""}${period}`;
+    }
+  }
+  return phrase;
+}
+
+export async function createTodoistTask(opts: CreateTodoistTaskOpts): Promise<TodoistTaskRef | null> {
+  const priority = opts.priority ?? "Medium";
+  try {
+    if (useDirectApi) {
+      const body: Record<string, any> = { content: opts.content, priority: toApiPriority(priority) };
+      if (opts.dueString) body.due_string = opts.dueString;
+      else if (opts.dueDatetime) body.due_datetime = opts.dueDatetime;
+      else if (opts.dueDate) body.due_date = opts.dueDate;
+      const task = await directRequest("/tasks", "POST", body);
+      return task ? normalizeApiTask(task) : null;
+    }
+    const connectorDueString = opts.dueString ?? (opts.dueDatetime ? isoToLooseDateTimeString(opts.dueDatetime) : opts.dueDate ?? undefined);
+    const result = await callExternalTool("todoist", "add-tasks", {
+      tasks: [
+        {
+          content: opts.content,
+          priority: toConnectorPriority(priority),
+          ...(connectorDueString ? { dueString: connectorDueString } : {}),
+        },
+      ],
+    });
+    const raw = result?.tasks?.[0];
+    return raw ? normalizeConnectorTask(raw) : null;
+  } catch (err) {
+    console.error("Todoist createTask failed:", (err as Error).message);
     return null;
   }
+}
+
+export interface QuickAddResult {
+  todoistId: string;
+  content: string;
+  priority: number; // raw Todoist 1 (default) - 4 (urgent)
+  dueDate: string | null; // YYYY-MM-DD, all-day
+  dueDatetime: string | null; // UTC ISO, exact time
+  isRecurring: boolean;
+  dueString: string | null; // Todoist's own normalized phrase, e.g. "every mon"
+}
+
+/**
+ * Hands the raw capture text straight to Todoist's own Quick Add parser
+ * (the same NLP engine behind Todoist's own apps) instead of our local
+ * chrono-node classifier. This both creates the Todoist task AND returns
+ * the parsed due date/time/recurrence, so classify.ts's job shrinks down to
+ * turning Todoist's answer into our Task/Event/Recurring bucket.
+ *
+ * Direct-API (production) only — the connected sandbox Todoist integration
+ * has no Quick Add equivalent, so this returns null there and callers should
+ * fall back to the local classify() parser exactly as before.
+ */
+export async function quickAddTodoistTask(text: string): Promise<QuickAddResult | null> {
+  if (!useDirectApi || !text.trim()) return null;
   try {
-    const data = await todoistFetch(`/tasks/${todoistId}`);
+    const task = await directRequest("/tasks/quick", "POST", { text, meta: true });
+    if (!task || !task.id) return null;
+    const due = task.due ?? null;
     return {
-      id: String(data.id),
-      content: data.content,
-      is_completed: !!data.is_completed,
-      due: data.due ?? null,
-      priority: data.priority ?? 1,
+      todoistId: String(task.id),
+      content: typeof task.content === "string" && task.content.trim() ? task.content.trim() : text,
+      priority: typeof task.priority === "number" ? task.priority : 1,
+      dueDate: due?.date ?? null,
+      dueDatetime: due?.datetime ?? null,
+      isRecurring: !!due?.is_recurring,
+      dueString: due?.string ?? null,
     };
-  } catch (e: any) {
-    if (e?.status === 404 || e?.status === 410) return null;
-    throw e;
+  } catch (err) {
+    console.error("Todoist quickAdd failed:", (err as Error).message);
+    return null;
+  }
+}
+
+/**
+ * Quick Add always creates a real Todoist task, even when our own classifier
+ * later decides the entry is really a plain Note (Todoist has no "note"
+ * concept). Best-effort cleanup so those don't linger in the user's Todoist
+ * as stray, date-less tasks. Direct-API only, matching quickAddTodoistTask.
+ */
+export async function deleteTodoistTask(id: string): Promise<boolean> {
+  if (!id || !useDirectApi) return false;
+  try {
+    await directRequest(`/tasks/${id}`, "DELETE");
+    return true;
+  } catch (err) {
+    console.error("Todoist deleteTask failed:", (err as Error).message);
+    return false;
+  }
+}
+
+export async function completeTodoistTask(id: string): Promise<boolean> {
+  if (!id) return false;
+  try {
+    if (useDirectApi) {
+      await directRequest(`/tasks/${id}/close`, "POST");
+      return true;
+    }
+    const result = await callExternalTool("todoist", "complete-tasks", { ids: [id] });
+    return (result?.successCount ?? 0) > 0;
+  } catch (err) {
+    console.error("Todoist completeTask failed:", (err as Error).message);
+    return false;
+  }
+}
+
+export async function reopenTodoistTask(id: string): Promise<boolean> {
+  if (!id) return false;
+  try {
+    if (useDirectApi) {
+      await directRequest(`/tasks/${id}/reopen`, "POST");
+      return true;
+    }
+    const result = await callExternalTool("todoist", "uncomplete-tasks", { ids: [id] });
+    return (result?.successCount ?? 0) > 0;
+  } catch (err) {
+    console.error("Todoist reopenTask failed:", (err as Error).message);
+    return false;
+  }
+}
+
+export async function updateTodoistTask(
+  id: string,
+  fields: { content?: string; dueDate?: string | null; priority?: "High" | "Medium" },
+): Promise<boolean> {
+  if (!id) return false;
+  try {
+    if (useDirectApi) {
+      const body: Record<string, any> = {};
+      if (fields.content !== undefined) body.content = fields.content;
+      if (fields.priority !== undefined) body.priority = toApiPriority(fields.priority);
+      if (fields.dueDate !== undefined) body.due_date = fields.dueDate || null;
+      await directRequest(`/tasks/${id}`, "POST", body);
+      return true;
+    }
+    const task: Record<string, any> = { id };
+    if (fields.content !== undefined) task.content = fields.content;
+    if (fields.priority !== undefined) task.priority = toConnectorPriority(fields.priority);
+    if (fields.dueDate !== undefined) task.dueString = fields.dueDate || "remove";
+    const result = await callExternalTool("todoist", "update-tasks", { tasks: [task] });
+    return (result?.successCount ?? 0) > 0;
+  } catch (err) {
+    console.error("Todoist updateTask failed:", (err as Error).message);
+    return false;
+  }
+}
+
+export async function listOpenTodoistTasks(): Promise<TodoistTaskRef[]> {
+  try {
+    if (useDirectApi) {
+      const tasks = await directRequest("/tasks", "GET");
+      const list = Array.isArray(tasks) ? tasks : tasks?.results ?? [];
+      return list.map(normalizeApiTask);
+    }
+    // Sandbox parity only: the connector's find-tasks requires at least one
+    // filter, so this wide window approximates "everything active" for
+    // testing here. Production always uses the unfiltered GET /tasks above.
+    const result = await callExternalTool("todoist", "find-tasks", {
+      filter: "(no due date | overdue | due before: 2099-12-31)",
+      limit: 100,
+    });
+    const raw = result?.tasks ?? [];
+    return raw.map(normalizeConnectorTask);
+  } catch (err) {
+    console.error("Todoist listOpenTasks failed:", (err as Error).message);
+    return [];
   }
 }

@@ -3,8 +3,8 @@
 // One-off (but safely re-runnable) setup script that creates the pieces of
 // Sheet structure the app expects but can't create for itself at runtime:
 // the "todoistId" header on the Tasks tab, and the "Focus Log" tab (with its
-// header row) used by server/lib/focus.ts. Safe to run again later — every
-// step checks current state first and skips if already correct.
+// header row) used by the Focus timer's session logging. Safe to run again
+// later — every step checks current state first and skips if already correct.
 //
 // Run with: npx tsx scripts/setup-sheet.ts
 // Requires GOOGLE_SERVICE_ACCOUNT_KEY in the environment (loaded from .env

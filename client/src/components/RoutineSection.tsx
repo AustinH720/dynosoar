@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Layout } from "@/components/Layout";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
@@ -225,7 +224,12 @@ function RoutineForm({ form, setForm }: { form: FormState; setForm: (f: FormStat
   );
 }
 
-export default function Routine() {
+/**
+ * Standalone routine management view, embedded as one of the two view modes
+ * on the Tasks page (Tasks / Routine segmented control) rather than its own
+ * top-level nav tab.
+ */
+export function RoutineSection() {
   const qc = useQueryClient();
   const { toast } = useToast();
   const { data, isLoading, isError } = useQuery<RoutineItem[]>({ queryKey: ["/api/routines"] });
@@ -319,9 +323,9 @@ export default function Routine() {
   const hasAny = (data?.length ?? 0) > 0;
 
   return (
-    <Layout title="Routine">
+    <>
       <div className="flex items-center justify-between mb-4">
-        <p className="text-sm text-muted-foreground">Recurring habits & scheduled blocks</p>
+        <p className="text-sm text-muted-foreground">Recurring habits &amp; scheduled blocks</p>
         <Dialog open={addOpen} onOpenChange={(open) => {
           setAddOpen(open);
           if (open) setAddForm(EMPTY_FORM);
@@ -375,42 +379,44 @@ export default function Routine() {
         </Card>
       )}
 
-      <Card className="border-card-border">
-        <CardContent className="pt-0 pb-1 px-0 divide-y divide-border">
-          {sorted.map((item) => (
-            <button
-              key={item.row}
-              onClick={() => openItem(item)}
-              className="w-full text-left py-3.5 px-4 hover-elevate rounded-md flex items-start gap-3"
-              data-testid={`card-routine-${item.row}`}
-            >
-              <div className="flex-1 min-w-0">
-                <p className="leading-snug font-medium">{item.activity}</p>
-                <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
-                  {item.timeBlock ? (
-                    <Badge variant="outline" className="gap-1">
-                      <Clock className="h-3 w-3" />
-                      {item.timeBlock}
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className="gap-1 text-muted-foreground">
-                      <Clock className="h-3 w-3" />
-                      Any time
-                    </Badge>
-                  )}
-                  <Badge variant="secondary">{daysLabel(item.days)}</Badge>
-                  {item.type && item.type !== "General" && <Badge variant="outline">{item.type}</Badge>}
-                  {item.scheduledToday && (
-                    <Badge className="bg-primary/15 text-primary border-primary/30" variant="outline">
-                      Today
-                    </Badge>
-                  )}
+      {hasAny && (
+        <Card className="border-card-border">
+          <CardContent className="pt-0 pb-1 px-0 divide-y divide-border">
+            {sorted.map((item) => (
+              <button
+                key={item.row}
+                onClick={() => openItem(item)}
+                className="w-full text-left py-3.5 px-4 hover-elevate rounded-md flex items-start gap-3"
+                data-testid={`card-routine-${item.row}`}
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="leading-snug font-medium">{item.activity}</p>
+                  <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                    {item.timeBlock ? (
+                      <Badge variant="outline" className="gap-1">
+                        <Clock className="h-3 w-3" />
+                        {item.timeBlock}
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="gap-1 text-muted-foreground">
+                        <Clock className="h-3 w-3" />
+                        Any time
+                      </Badge>
+                    )}
+                    <Badge variant="secondary">{daysLabel(item.days)}</Badge>
+                    {item.type && item.type !== "General" && <Badge variant="outline">{item.type}</Badge>}
+                    {item.scheduledToday && (
+                      <Badge className="bg-primary/15 text-primary border-primary/30" variant="outline">
+                        Today
+                      </Badge>
+                    )}
+                  </div>
                 </div>
-              </div>
-            </button>
-          ))}
-        </CardContent>
-      </Card>
+              </button>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <Dialog open={!!activeItem} onOpenChange={(open) => !open && setActiveItem(null)}>
         <DialogContent data-testid="dialog-routine-detail" className="max-h-[85vh] overflow-y-auto">
@@ -460,6 +466,6 @@ export default function Routine() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </Layout>
+    </>
   );
 }

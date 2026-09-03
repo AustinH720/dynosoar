@@ -57,13 +57,24 @@ export async function getValues(tab: string, a1Range: string): Promise<string[][
   return res.values || [];
 }
 
+// Value input option is RAW, not USER_ENTERED. USER_ENTERED tells Sheets to
+// auto-parse strings that look like dates/times/numbers and convert them to
+// serial values, which only render correctly if the target cell already has
+// an explicit date/time number format. Newly appended rows (INSERT_ROWS)
+// don't reliably inherit that format, so a date like "2026-09-08" silently
+// became the raw serial number 46273 with no visible date. RAW stores every
+// string exactly as sent (still stores real JS numbers as numbers), which
+// avoids this entirely and matches how every read-side helper in this file
+// already expects to receive plain "YYYY-MM-DD" / "HH:mm" text.
+const VALUE_INPUT_OPTION = "RAW";
+
 export async function appendRow(tab: string, row: any[]): Promise<any> {
   if (useServiceAccount) {
     const sheets = getSheetsClient();
     const res = await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: quoteRange(tab, "A1"),
-      valueInputOption: "USER_ENTERED",
+      valueInputOption: VALUE_INPUT_OPTION,
       insertDataOption: "INSERT_ROWS",
       requestBody: { values: [row] },
     });
@@ -74,7 +85,7 @@ export async function appendRow(tab: string, row: any[]): Promise<any> {
     {
       spreadsheetId: SPREADSHEET_ID,
       range: quoteRange(tab, "A1"),
-      valueInputOption: "USER_ENTERED",
+      valueInputOption: VALUE_INPUT_OPTION,
       insertDataOption: "INSERT_ROWS",
     },
     { values: [row] },
@@ -87,7 +98,7 @@ export async function updateRow(tab: string, a1Range: string, row: any[]): Promi
     const res = await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: quoteRange(tab, a1Range),
-      valueInputOption: "USER_ENTERED",
+      valueInputOption: VALUE_INPUT_OPTION,
       requestBody: { values: [row] },
     });
     return res.data;
@@ -97,7 +108,7 @@ export async function updateRow(tab: string, a1Range: string, row: any[]): Promi
     {
       spreadsheetId: SPREADSHEET_ID,
       range: quoteRange(tab, a1Range),
-      valueInputOption: "USER_ENTERED",
+      valueInputOption: VALUE_INPUT_OPTION,
     },
     { values: [row] },
   );

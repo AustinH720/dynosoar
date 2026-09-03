@@ -3,7 +3,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
 import { useTheme, ACCENT_COLORS, type ThemeMode } from "@/lib/theme";
 import { useSettings, useUpdateSettings } from "@/hooks/use-settings";
 import { BACKGROUND_SCENES, SCENE_ACCENTS, sceneForStage } from "@/components/DinoCompanion";
@@ -11,7 +10,8 @@ import { useQuery } from "@tanstack/react-query";
 import { getQueryFn } from "@/lib/queryClient";
 import type { PlayerState } from "@/components/DinoCompanion";
 import { cn } from "@/lib/utils";
-import { Check, Sparkles, Link2, Link2Off } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Check, Sparkles, RefreshCw, CheckCircle2, AlertCircle } from "lucide-react";
 
 const MODE_OPTIONS: { value: ThemeMode; label: string }[] = [
   { value: "Light", label: "Light" },
@@ -27,58 +27,18 @@ export default function Settings() {
     queryKey: ["/api/player"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
+
+  const backgroundScene = settings?.backgroundScene ?? "field";
+  const autoScene = player ? sceneForStage(player.stage) : "field";
+
   const { data: todoistStatus, isLoading: todoistLoading } = useQuery<{ configured: boolean }>({
     queryKey: ["/api/todoist/status"],
     queryFn: getQueryFn({ on401: "throw" }),
   });
 
-  const backgroundScene = settings?.backgroundScene ?? "field";
-  const autoScene = player ? sceneForStage(player.stage) : "field";
-
   return (
     <Layout title="Settings">
       <div className="space-y-5">
-        <Card className="border-card-border">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base font-display">Todoist Sync</CardTitle>
-            <p className="text-xs text-muted-foreground">
-              When connected, capture-box entries are parsed by Todoist first (dates, times,
-              recurrence, #project/@label/p1-p4 syntax) before being sorted into Tasks, Events,
-              Recurring, or Notes.
-            </p>
-          </CardHeader>
-          <CardContent>
-            {todoistLoading ? (
-              <Skeleton className="h-9 w-full rounded-lg" />
-            ) : (
-              <div
-                className="flex items-center justify-between gap-2 rounded-lg border border-border px-3 py-2.5"
-                data-testid="status-todoist-connection"
-              >
-                <div className="flex items-center gap-2">
-                  {todoistStatus?.configured ? (
-                    <Link2 className="h-4 w-4 text-primary" />
-                  ) : (
-                    <Link2Off className="h-4 w-4 text-muted-foreground" />
-                  )}
-                  <span className="text-sm font-medium">
-                    {todoistStatus?.configured ? "Connected" : "Not configured"}
-                  </span>
-                </div>
-                <Badge variant={todoistStatus?.configured ? "default" : "secondary"}>
-                  {todoistStatus?.configured ? "Production" : "TODOIST_API_TOKEN not set"}
-                </Badge>
-              </div>
-            )}
-            {!todoistLoading && !todoistStatus?.configured && (
-              <p className="text-xs text-muted-foreground mt-2">
-                Set <code>TODOIST_API_TOKEN</code> in your environment to enable live sync. Until
-                then, captures still work — Todoist parsing falls back to a manual-fix Task.
-              </p>
-            )}
-          </CardContent>
-        </Card>
-
         <Card className="border-card-border">
           <CardHeader className="pb-3">
             <CardTitle className="text-base font-display">Theme Mode</CardTitle>
@@ -187,6 +147,43 @@ export default function Settings() {
               {/^[aeiou]/i.test(ACCENT_COLORS[SCENE_ACCENTS[autoScene] ?? "indigo"]?.label ?? "") ? " an " : " a "}
               {ACCENT_COLORS[SCENE_ACCENTS[autoScene] ?? "indigo"]?.label.toLowerCase()} accent.
             </p>
+          </CardContent>
+        </Card>
+
+        <Card className="border-card-border">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-display flex items-center gap-2">
+              <RefreshCw className="h-4 w-4" />
+              Todoist
+            </CardTitle>
+            <p className="text-xs text-muted-foreground">
+              Two-way task sync. New tasks and recurring items you capture are sent to Todoist
+              using its own date/recurrence parser; use the "Sync Todoist" button on the Tasks
+              page any time to pull in changes made there.
+            </p>
+          </CardHeader>
+          <CardContent>
+            {todoistLoading ? (
+              <Skeleton className="h-9 w-full rounded-lg" />
+            ) : todoistStatus?.configured ? (
+              <Badge variant="outline" className="gap-1.5 py-1.5 px-3" data-testid="badge-todoist-status">
+                <CheckCircle2 className="h-3.5 w-3.5 text-primary" />
+                Connected via TODOIST_API_TOKEN
+              </Badge>
+            ) : (
+              <div className="space-y-2">
+                <Badge variant="outline" className="gap-1.5 py-1.5 px-3" data-testid="badge-todoist-status">
+                  <AlertCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                  Not connected in production
+                </Badge>
+                <p className="text-xs text-muted-foreground">
+                  Add a <code className="font-mono">TODOIST_API_TOKEN</code> environment variable in
+                  Vercel (Todoist Settings → Integrations → Developer → API token) to enable sync
+                  on the live app. This sandbox preview can still test sync using the connected
+                  Todoist integration here.
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -12,6 +12,7 @@ export const XP_RULES = {
   task_completed: 20,
   freeform_completion: 15,
   routine_completed: 10,
+  focus_session_completed: 15,
 } as const;
 
 export type XpSource = keyof typeof XP_RULES;
@@ -22,6 +23,7 @@ const COIN_RULES: Partial<Record<XpSource, number>> = {
   task_completed: 8,
   freeform_completion: 6,
   routine_completed: 5,
+  focus_session_completed: 6,
 };
 
 // ---------- Skill tracks (RuneScape-style) ----------
@@ -40,7 +42,7 @@ const SKILL_KEYWORDS: Record<SkillId, string[]> = {
   strength: ["workout", "gym", "fitness", "exercise", "run", "strength", "training", "lift"],
   smarter: [
     "study", "work", "job", "recruit", "cfa", "read", "reading", "interview", "real estate",
-    "research", "learn", "school", "course", "exam", "practice set", "deep work",
+    "research", "learn", "school", "course", "exam", "practice set", "deep work", "focus", "pomodoro",
   ],
   fishing: ["fish", "tank", "aquarium", "filter"],
 };
@@ -105,41 +107,202 @@ export function stageFromLevel(level: number): StageInfo {
   return { stage: match.stage, stageName: match.stageName, levelRange: match.levelRange };
 }
 
-// ---------- Hunger (neglect) ----------
-export type HungerLevel = "fed" | "peckish" | "hungry";
+// ---------- Companion roster ----------
+// Every companion shares the player's single global level/stage (see
+// stageFromLevel above) — there is no separate per-companion XP track.
+// Unlocking a new companion at a higher level is a deliberate design
+// choice: each unlock level lines up with a STAGES tier boundary, so a
+// stage-up moment and a new-companion moment always land together.
+export type CompanionId = "mossback" | "riptide" | "chomp" | "noodle" | "stretch";
 
-export interface HungerInfo {
-  level: HungerLevel;
-  daysSinceActivity: number | null;
-  message: string;
+export interface CompanionMeta {
+  id: CompanionId;
+  name: string;
+  species: string;
+  unlockLevel: number;
 }
 
+export const COMPANIONS: CompanionMeta[] = [
+  { id: "mossback", name: "Mossback", species: "Dinosaur", unlockLevel: 1 },
+  { id: "riptide", name: "Riptide", species: "Mosasaurus", unlockLevel: 4 },
+  { id: "chomp", name: "Chomp", species: "Liopleurodon", unlockLevel: 7 },
+  { id: "noodle", name: "Noodle", species: "Elasmosaurus", unlockLevel: 11 },
+  { id: "stretch", name: "Stretch", species: "Albertonectes", unlockLevel: 16 },
+];
+
+const DEFAULT_COMPANION: CompanionId = "mossback";
+
+export function isCompanionId(value: string): value is CompanionId {
+  return COMPANIONS.some((c) => c.id === value);
+}
+
+export function unlockedCompanions(level: number): CompanionMeta[] {
+  return COMPANIONS.filter((c) => level >= c.unlockLevel);
+}
+
+// Player row column Q: ActiveCompanionId (string).
+export async function getActiveCompanionId(): Promise<CompanionId> {
+  const values = await getValues(TABS.PLAYER, "Q2:Q2");
+  const raw = (values[0]?.[0] ?? "").trim();
+  return isCompanionId(raw) ? raw : DEFAULT_COMPANION;
+}
+
+export async function setActiveCompanionId(
+  id: string,
+): Promise<{ ok: boolean; message?: string; activeCompanionId: CompanionId }> {
+  if (!isCompanionId(id)) {
+    return { ok: false, message: "That companion doesn't exist.", activeCompanionId: await getActiveCompanionId() };
+  }
+  const player = await getPlayerState();
+  const meta = COMPANIONS.find((c) => c.id === id)!;
+  if (player.level < meta.unlockLevel) {
+    return {
+      ok: false,
+      message: `${meta.name} unlocks at level ${meta.unlockLevel}. You're level ${player.level}.`,
+      activeCompanionId: await getActiveCompanionId(),
+    };
+  }
+  await updateRow(TABS.PLAYER, "Q2:Q2", [id]);
+  return { ok: true, activeCompanionId: id };
+}
+
+export async function getCompanionsState(): Promise<{
+  companions: (CompanionMeta & { unlocked: boolean; stage: number; stageName: string })[];
+  activeCompanionId: CompanionId;
+  level: number;
+  stage: number;
+  stageName: string;
+}> {
+  const [player, activeCompanionId] = await Promise.all([getPlayerState(), getActiveCompanionId()]);
+  const companions = COMPANIONS.map((c) => ({
+    ...c,
+    unlocked: player.level >= c.unlockLevel,
+    stage: player.stage,
+    stageName: player.stageName,
+  }));
+  return {
+    companions,
+    activeCompanionId,
+    level: player.level,
+    stage: player.stage,
+    stageName: player.stageName,
+  };
+}
+
+// ---------- Health / Daily Check-In (presence-based, visual only) ----------
+// Drynosaur-style: one tap a day tops up the health bar and extends a streak.
+// Task/quest completion still earns XP separately — it is NOT required to
+// check in, and checking in never awards XP/coins itself. Health is purely
+// a visual nudge with zero effect on XP, leveling, or skills.
 function daysBetween(fromStr: string, toStr: string): number {
   const from = new Date(fromStr + "T00:00:00");
   const to = new Date(toStr + "T00:00:00");
   return Math.round((to.getTime() - from.getTime()) / 86400000);
 }
 
-export function hungerFromActivity(lastActivityDate: string, todayStr: string): HungerInfo {
-  if (!lastActivityDate) {
-    return { level: "fed", daysSinceActivity: null, message: "Complete a task to start feeding Mossback!" };
-  }
-  const days = daysBetween(lastActivityDate, todayStr);
-  if (days <= 1) {
-    return { level: "fed", daysSinceActivity: days, message: "Well fed and happy." };
-  }
-  if (days <= 3) {
-    return {
-      level: "peckish",
-      daysSinceActivity: days,
-      message: `Getting hungry — it's been ${days} days since your last completed task.`,
-    };
-  }
+export interface CheckinState {
+  checkedInToday: boolean;
+  streak: number;
+  health: number; // 0-100, visual only
+  tasksCompletedToday: number; // 0..dailyTaskGoal, for UI progress (e.g. "2/3 tasks today")
+  dailyTaskGoal: number;
+}
+
+/**
+ * Health decays only after a *missed* check-in day, never on the same day
+ * you're still free to check in. lastHealthRefillDate is bumped by both
+ * checking in and feeding, so either action tops the bar back to 100.
+ */
+function healthFromRefillDate(lastHealthRefillDate: string, todayStr: string): number {
+  if (!lastHealthRefillDate) return 100;
+  const days = daysBetween(lastHealthRefillDate, todayStr);
+  if (days <= 1) return 100;
+  const missed = days - 1;
+  return Math.max(0, 100 - missed * 25);
+}
+
+// ---------- Health / Daily task goal (stacks with check-in decay) ----------
+// A second, independent decay track: miss the daily task-completion goal and
+// health takes a (smaller, per-day) hit too. The two tracks "stack" in the
+// sense that whichever is worse on a given day wins — final health is the
+// minimum of the check-in-based health and the task-goal-based health.
+const DAILY_TASK_GOAL = 3;
+const TASK_HEALTH_DECAY_RATE = 15; // percent per missed day, vs. 25% for check-in
+
+function healthFromTaskGoalDate(lastTaskGoalMetDate: string, todayStr: string): number {
+  if (!lastTaskGoalMetDate) return 100;
+  const days = daysBetween(lastTaskGoalMetDate, todayStr);
+  if (days <= 1) return 100;
+  const missed = days - 1;
+  return Math.max(0, 100 - missed * TASK_HEALTH_DECAY_RATE);
+}
+
+async function readCheckinRow(): Promise<{
+  lastCheckIn: string;
+  streak: number;
+  lastHealthRefill: string;
+  tasksCompletedTodayDate: string;
+  tasksCompletedTodayCount: number;
+  lastTaskGoalMetDate: string;
+}> {
+  const values = await getValues(TABS.PLAYER, "R2:W2");
+  const row = values[0] ?? [];
   return {
-    level: "hungry",
-    daysSinceActivity: days,
-    message: `Mossback is hungry! It's been ${days} days — complete a task to feed them.`,
+    lastCheckIn: row[0] ?? "",
+    streak: Number(row[1] ?? 0) || 0,
+    lastHealthRefill: row[2] ?? "",
+    tasksCompletedTodayDate: row[3] ?? "",
+    tasksCompletedTodayCount: Number(row[4] ?? 0) || 0,
+    lastTaskGoalMetDate: row[5] ?? "",
   };
+}
+
+export async function getCheckinState(): Promise<CheckinState> {
+  const today = todayStrLocal();
+  const { lastCheckIn, streak, lastHealthRefill, tasksCompletedTodayDate, tasksCompletedTodayCount, lastTaskGoalMetDate } =
+    await readCheckinRow();
+  const checkinHealth = healthFromRefillDate(lastHealthRefill, today);
+  const taskHealth = healthFromTaskGoalDate(lastTaskGoalMetDate, today);
+  const tasksToday = tasksCompletedTodayDate === today ? tasksCompletedTodayCount : 0;
+  return {
+    checkedInToday: lastCheckIn === today,
+    streak,
+    health: Math.min(checkinHealth, taskHealth),
+    tasksCompletedToday: Math.min(tasksToday, DAILY_TASK_GOAL),
+    dailyTaskGoal: DAILY_TASK_GOAL,
+  };
+}
+
+export async function doCheckIn(): Promise<{ ok: boolean; alreadyCheckedIn: boolean; state: CheckinState }> {
+  const today = todayStrLocal();
+  const { lastCheckIn, streak } = await readCheckinRow();
+  if (lastCheckIn === today) {
+    return { ok: true, alreadyCheckedIn: true, state: await getCheckinState() };
+  }
+  const newStreak = lastCheckIn && daysBetween(lastCheckIn, today) === 1 ? streak + 1 : 1;
+  await updateRow(TABS.PLAYER, "R2:T2", [today, newStreak, today]);
+  return { ok: true, alreadyCheckedIn: false, state: await getCheckinState() };
+}
+
+/**
+ * Called from awardXp() whenever a real task/routine/freeform/focus
+ * completion happens. Bumps today's completion counter (resetting it if the
+ * date rolled over) and, once the daily goal is hit, stamps
+ * LastTaskGoalMetDate so healthFromTaskGoalDate() treats today as "goal met"
+ * for decay purposes.
+ */
+async function recordTaskCompletionForHealth(): Promise<void> {
+  const today = todayStrLocal();
+  const { tasksCompletedTodayDate, tasksCompletedTodayCount, lastTaskGoalMetDate } = await readCheckinRow();
+  const newCount = tasksCompletedTodayDate === today ? tasksCompletedTodayCount + 1 : 1;
+  const newLastTaskGoalMetDate = newCount >= DAILY_TASK_GOAL ? today : lastTaskGoalMetDate;
+  await updateRow(TABS.PLAYER, "U2:W2", [today, newCount, newLastTaskGoalMetDate]);
+}
+
+/** Feeding refills health (same visual top-up as check-in) without touching the streak. */
+async function refillHealthOnly(): Promise<void> {
+  const today = todayStrLocal();
+  await updateRow(TABS.PLAYER, "T2:T2", [today]);
 }
 
 // ---------- Player state read/write ----------
@@ -153,7 +316,6 @@ export interface SkillState {
 export interface PlayerState extends LevelInfo, StageInfo {
   coins: number;
   skills: SkillState[];
-  hunger: HungerInfo;
 }
 
 export async function getPlayerState(): Promise<PlayerState> {
@@ -164,13 +326,13 @@ export async function getPlayerState(): Promise<PlayerState> {
   const stage = stageFromLevel(info.level);
   // Player row columns: A User, B TotalXP, C Level, D Stage, E StageName,
   // F XPIntoLevel, G XPToNextLevel, H LastUpdated, I ThemeMode, J Accent,
-  // K BackgroundScene, L Coins, M StrengthXP, N SmarterXP, O FishingXP, P LastActivityDate.
+  // K BackgroundScene, L Coins, M StrengthXP, N SmarterXP, O FishingXP, P LastActivityDate,
+  // Q ActiveCompanionId, R LastCheckInDate, S CheckInStreak, T LastHealthRefillDate,
+  // U TasksCompletedTodayDate, V TasksCompletedTodayCount, W LastTaskGoalMetDate.
   const coins = Number(row[11] ?? 0) || 0;
   const strengthXp = Number(row[12] ?? 0) || 0;
   const smarterXp = Number(row[13] ?? 0) || 0;
   const fishingXp = Number(row[14] ?? 0) || 0;
-  const lastActivityDate = row[15] ?? "";
-  const today = todayStrLocal();
   return {
     ...info,
     ...stage,
@@ -180,7 +342,6 @@ export async function getPlayerState(): Promise<PlayerState> {
       { id: "smarter", label: "Smarter", emoji: "🧠", xp: smarterXp },
       { id: "fishing", label: "Fishing", emoji: "🎣", xp: fishingXp },
     ],
-    hunger: hungerFromActivity(lastActivityDate, today),
   };
 }
 
@@ -246,7 +407,11 @@ export async function awardXp(
   await writePlayerCore({ ...info, ...stage });
 
   const coinsAwarded = COIN_RULES[source] ?? 0;
-  const isCompletion = source === "task_completed" || source === "freeform_completion" || source === "routine_completed";
+  const isCompletion =
+    source === "task_completed" ||
+    source === "freeform_completion" ||
+    source === "routine_completed" ||
+    source === "focus_session_completed";
   const skill = isCompletion ? categorizeSkill(category, extraSkillText, description) : null;
 
   const skillPatch: Parameters<typeof writePlayerSkillsAndCoins>[0] = {};
@@ -258,6 +423,10 @@ export async function awardXp(
 
   if (Object.keys(skillPatch).length > 0) {
     await writePlayerSkillsAndCoins(skillPatch);
+  }
+
+  if (isCompletion) {
+    await recordTaskCompletionForHealth();
   }
 
   const after = await getPlayerState();
@@ -281,45 +450,44 @@ export async function awardXp(
   };
 }
 
-/**
- * Credits a variable, pre-computed XP amount directly to the player,
- * bypassing the fixed XP_RULES lookup that awardXp() uses. For sources like
- * focus sessions where the amount scales with input (minutes) rather than
- * being a fixed per-action reward. No coins, skill XP, or hunger/activity
- * tracking — those stay tied to actual task/routine completions.
- */
-export async function awardCustomXp(
-  amount: number,
-  description: string,
-  category: string = "",
-): Promise<AwardResult> {
-  const before = await getPlayerState();
-  const xpAwarded = amount;
-  const newTotal = before.totalXp + xpAwarded;
-  const info = levelFromXp(newTotal);
-  const stage = stageFromLevel(info.level);
+// ---------- Feed ----------
+// Feeding is a simple, always-available coin sink separate from the Shop
+// below: spend coins to give your companion a snack, which tops up the
+// visual health bar (same effect as a daily check-in) without touching the
+// check-in streak.
+export interface FeedItem {
+  id: string;
+  name: string;
+  emoji: string;
+  cost: number;
+  description: string;
+}
 
-  await writePlayerCore({ ...info, ...stage });
+export const FEED_ITEMS: FeedItem[] = [
+  { id: "berries", name: "Wild Berries", emoji: "🫐", cost: 10, description: "A quick snack to perk them up." },
+  { id: "fish", name: "Fresh Fish", emoji: "🐟", cost: 20, description: "A hearty catch-of-the-day meal." },
+  { id: "feast", name: "Jungle Feast", emoji: "🍖", cost: 40, description: "A full spread fit for a dino." },
+  { id: "treat", name: "Golden Treat", emoji: "✨", cost: 75, description: "A rare, shimmering delicacy." },
+];
 
-  const after = await getPlayerState();
+export async function getFeedState(): Promise<{ items: FeedItem[]; coins: number; health: number }> {
+  const [player, checkin] = await Promise.all([getPlayerState(), getCheckinState()]);
+  return { items: FEED_ITEMS, coins: player.coins, health: checkin.health };
+}
 
-  await appendRow(TABS.XP_LEDGER, [
-    new Date().toISOString(),
-    "focus_session",
-    description,
-    xpAwarded,
-    newTotal,
-    category,
-  ]);
+export async function feedCompanion(
+  itemId: string,
+): Promise<{ ok: boolean; message?: string; coins?: number; health?: number }> {
+  const item = FEED_ITEMS.find((i) => i.id === itemId);
+  if (!item) return { ok: false, message: "That food doesn't exist." };
+  const player = await getPlayerState();
+  if (player.coins < item.cost) return { ok: false, message: "Not enough coins for that." };
 
-  return {
-    player: after,
-    xpAwarded,
-    coinsAwarded: 0,
-    skill: null,
-    leveledUp: after.level > before.level,
-    stageChanged: after.stage > before.stage,
-  };
+  const newCoins = player.coins - item.cost;
+  await writePlayerSkillsAndCoins({ coins: newCoins });
+  await refillHealthOnly();
+  const checkin = await getCheckinState();
+  return { ok: true, coins: newCoins, health: checkin.health };
 }
 
 // ---------- Shop ----------
@@ -620,6 +788,80 @@ export async function toggleRoutineComplete(
   await updateRow(TABS.ROUTINE, `G${row}`, [todayStr]);
   const xp = await awardXp("routine_completed", activity, type, activity);
   return { doneToday: true, xp };
+}
+
+// ---------- My Day (voice-planned daily checklist) ----------
+// "My Day" items live in the same Tasks tab as everything else (category
+// "My Day", dueDate = today) so the existing task-completion + XP pipeline
+// is reused as-is. Unlike /api/tasks, planning a day does NOT sync to
+// Todoist/Calendar — these are quick, ephemeral voice-captured items for
+// today only, not durable cross-app tasks.
+const MY_DAY_CATEGORY = "My Day";
+
+export interface MyDayItem {
+  row: number;
+  task: string;
+  status: string;
+}
+
+export async function planMyDay(items: string[]): Promise<{ created: number; xpAwarded: number }> {
+  const today = todayStrLocal();
+  let xpAwarded = 0;
+  for (const raw of items) {
+    const task = raw.trim();
+    if (!task) continue;
+    await appendRow(TABS.TASKS, [task, MY_DAY_CATEGORY, today, "Medium", "Not Started", "My Day (voice)", today, "", ""]);
+    const xp = await awardXp("task_added", task, MY_DAY_CATEGORY, "");
+    xpAwarded += xp.xpAwarded;
+  }
+  return { created: items.filter((i) => i.trim()).length, xpAwarded };
+}
+
+export async function getMyDayItems(): Promise<MyDayItem[]> {
+  const today = todayStrLocal();
+  const values = await getValues(TABS.TASKS, "A2:I2000");
+  return values
+    .map((row, i) => ({ row: i + 2, cells: row }))
+    .filter((r) => r.cells[0] && r.cells[1] === MY_DAY_CATEGORY && r.cells[2] === today)
+    .map((r) => ({ row: r.row, task: r.cells[0] ?? "", status: r.cells[4] ?? "Not Started" }));
+}
+
+// ---------- Focus (Pomodoro) sessions ----------
+// Fixed 25-minute focus / 5-minute break cycle, kicked off by tapping the
+// companion on the dedicated Focus page. Only a session that runs to
+// completion (not cancelled early) is logged and rewarded — it awards XP
+// + coins like any other completion and counts toward the daily 3-task
+// health goal via awardXp()'s existing isCompletion hook.
+export const FOCUS_WORK_MINUTES = 25;
+export const FOCUS_BREAK_MINUTES = 5;
+
+export interface FocusCompleteResult {
+  xp: AwardResult;
+  sessionsToday: number;
+}
+
+export async function logFocusSessionComplete(durationMinutes: number): Promise<FocusCompleteResult> {
+  const xp = await awardXp("focus_session_completed", "Focus session", "Focus", "focus pomodoro");
+  await appendRow(TABS.FOCUS_LOG, [
+    new Date().toISOString(),
+    durationMinutes,
+    "Yes",
+    "",
+    "",
+    xp.xpAwarded,
+  ]);
+  const sessionsToday = await countFocusSessionsToday();
+  return { xp, sessionsToday };
+}
+
+export async function countFocusSessionsToday(): Promise<number> {
+  const today = todayStrLocal();
+  const values = await getValues(TABS.FOCUS_LOG, "A2:C2000");
+  return values.filter((row) => {
+    const ts = row[0] ?? "";
+    const completed = row[2] ?? "";
+    return completed === "Yes" && ts.startsWith(today);
+  }).length;
 }
 
 // ---------- Fuzzy match free text against open tasks ----------

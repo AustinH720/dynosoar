@@ -1,5 +1,5 @@
 import * as chrono from "chrono-node";
-import type { TodoistTask } from "./todoist.js";
+import { utcIsoToAppTzParts } from "./time.js";
 
 export type EntryType = "Event" | "Task" | "Note" | "Recurring";
 
@@ -26,13 +26,6 @@ export interface Classification {
   // general/any-time habit (e.g. "water change on Wednesday") and should
   // not get a forced default time or a timed calendar event.
   hasExplicitTime?: boolean;
-  // Set when this classification came from Todoist's Quick Add parse
-  // rather than (or in addition to) the local heuristic, so the capture
-  // route knows to persist the linked Todoist task id.
-  todoistId?: string;
-  // Set when Todoist parsing was attempted but failed/timed out and this
-  // classification is a manual-fix fallback (see classifyFromTodoist).
-  todoistFallback?: boolean;
 }
 
 const RECURRING_PATTERNS: { re: RegExp; label: string; rrule: string }[] = [
@@ -70,7 +63,7 @@ const CATEGORY_RULES: { re: RegExp; label: string }[] = [
   { re: /\b(rent|bill|bank|invoice|tax|budget)\b/i, label: "Finance" },
 ];
 
-function guessCategory(text: string): string {
+export function guessCategory(text: string): string {
   for (const rule of CATEGORY_RULES) {
     if (rule.re.test(text)) return rule.label;
   }
@@ -118,34 +111,6 @@ function stripDateTimePhrase(text: string, matchedText: string): string {
   result = result.replace(/^(at|on|for)\s+/i, "").trim();
   result = result.replace(/\s*,\s*$/, "").replace(/^\s*,\s*/, "").trim();
   return result.length > 0 ? result : text;
-}
-
-/**
- * Derives an RRULE + human cadence label from free text (e.g. "every
- * Wednesday", "daily", "weekdays"). Shared by the local classify() path and
- * classifyFromTodoist() — Todoist tells us a task IS recurring but doesn't
- * hand back an RRULE, so we still need this regex pass over the text (or
- * Todoist's due.string) to get a calendar-compatible recurrence rule.
- * Returns null if no known cadence pattern matches.
- */
-function deriveRrule(text: string): { rrule: string; label: string } | null {
-  for (const pat of RECURRING_PATTERNS) {
-    if (pat.re.test(text)) {
-      let rrule = pat.rrule;
-      let label = pat.label;
-      const dayMatch = text.match(SPECIFIC_WEEKDAY_RE);
-      if (dayMatch) {
-        const key = dayMatch[1].toLowerCase();
-        const wd = WEEKDAY_CODES[key];
-        if (wd) {
-          rrule = `RRULE:FREQ=WEEKLY;BYDAY=${wd.code}`;
-          label = `Weekly (${wd.label.slice(0, 3)})`;
-        }
-      }
-      return { rrule, label };
-    }
-  }
-  return null;
 }
 
 export function classify(text: string, now: Date = new Date()): Classification {
@@ -251,118 +216,113 @@ export function classify(text: string, now: Date = new Date()): Classification {
   return { type: "Note", category: guessCategory(trimmed) };
 }
 
-/**
- * Maps a Todoist Quick Add result onto DynoSOAR's Task/Event/Recurring/Note
- * buckets. This is the primary classification path when Todoist is
- * configured — the local chrono-based classify() above becomes a fallback,
- * used only when Todoist detected no date at all (to decide Task vs. Note,
- * since Todoist has no "note" concept) or when the Todoist call itself
- * failed (see the `todoistFallback` case, called separately by the capture
- * route — this function assumes the call succeeded).
- *
- * Mapping rules (confirmed):
- *   - due.is_recurring        -> Recurring
- *   - due.datetime present    -> Event   (Todoist parsed a specific time)
- *   - due.date, no datetime   -> Task    (Todoist parsed a date only)
- *   - due null                -> local classify() decides Task vs. Note
- */
-export function classifyFromTodoist(
-  todoistTask: TodoistTask,
-  originalText: string,
-  now: Date = new Date(),
-): Classification {
-  const { due } = todoistTask;
-  const category = guessCategory(originalText);
-
-  if (!due) {
-    // Todoist found no date/recurrence in the text at all. Fall back to the
-    // local heuristic, but constrain its result to Task/Note only — an
-    // Event or Recurring classification without any date data from either
-    // source isn't trustworthy.
-    const local = classify(originalText, now);
-    const type: EntryType = local.type === "Note" ? "Note" : "Task";
-    return {
-      type,
-      dueDate: type === "Task" ? local.dueDate ?? null : undefined,
-      priority: local.priority,
-      category,
-      todoistId: todoistTask.id,
-    };
-  }
-
-  if (due.is_recurring) {
-    // Todoist confirms recurrence but doesn't return an RRULE — derive one
-    // from Todoist's human-readable cadence string (falls back to the raw
-    // text if that doesn't match a known pattern either).
-    const derived = deriveRrule(due.string) ?? deriveRrule(originalText) ?? {
-      rrule: "RRULE:FREQ=WEEKLY",
-      label: "Recurring",
-    };
-    let startDate: Date | null = null;
-    let hasExplicitTime = false;
-    if (due.datetime) {
-      startDate = new Date(due.datetime);
-      hasExplicitTime = true;
-    } else if (due.date) {
-      const [y, m, d] = due.date.split("-").map(Number);
-      startDate = new Date(y, m - 1, d);
-    }
-    const endDate =
-      hasExplicitTime && startDate
-        ? new Date(startDate.getTime() + DEFAULT_RECURRING_DURATION_MIN * 60 * 1000)
-        : null;
-    return {
-      type: "Recurring",
-      rrule: derived.rrule,
-      cadenceLabel: derived.label,
-      eventDate: startDate ? fmtDate(startDate) : due.date,
-      startTime: hasExplicitTime && startDate ? fmtTime(startDate) : undefined,
-      endTime: hasExplicitTime && endDate ? fmtTime(endDate) : undefined,
-      category,
-      hasExplicitTime,
-      todoistId: todoistTask.id,
-    };
-  }
-
-  if (due.datetime) {
-    const startDate = new Date(due.datetime);
-    const endDate = new Date(startDate.getTime() + 30 * 60 * 1000);
-    return {
-      type: "Event",
-      eventDate: fmtDate(startDate),
-      startTime: fmtTime(startDate),
-      endTime: fmtTime(endDate),
-      location: null,
-      category,
-      cleanTitle: todoistTask.content || originalText,
-      todoistId: todoistTask.id,
-    };
-  }
-
-  // Date only, no specific time.
-  return {
-    type: "Task",
-    dueDate: due.date,
-    priority: URGENT_WORDS.test(originalText) ? "High" : "Medium",
-    category,
-    todoistId: todoistTask.id,
-  };
+export interface TodoistQuickAddInput {
+  content: string;
+  priority: number; // raw Todoist 1-4
+  dueDate: string | null;
+  dueDatetime: string | null;
+  isRecurring: boolean;
+  dueString: string | null;
 }
 
 /**
- * Fallback classification used by the capture route when the Todoist Quick
- * Add call itself fails or times out (network error, 5xx, timeout — not a
- * "Todoist found nothing" case, which is handled inside classifyFromTodoist
- * above). Per product decision: save as a Task with no date, flagged for
- * manual fix, rather than silently falling back to full local parsing or
- * failing the capture outright.
+ * Turns a Todoist Quick Add parse result into our Classification shape.
+ * Todoist's own NLP owns date/time/recurrence extraction here — this only
+ * decides the Task/Event/Recurring bucket from what Todoist detected, plus
+ * the one case Todoist has no concept of at all: telling an actionable Task
+ * apart from a plain Note when no due date was found in the text.
  */
-export function classifyTodoistFailure(originalText: string): Classification {
-  return {
-    type: "Task",
-    dueDate: null,
-    priority: "Medium",
-    category: guessCategory(originalText),
-    todoistFallback: true,
-  };
+export function classifyFromTodoist(text: string, q: TodoistQuickAddInput, now: Date = new Date()): Classification {
+  const trimmed = text.trim();
+  const category = guessCategory(trimmed);
+  const cleanTitle = q.content && q.content.trim().length > 0 ? q.content.trim() : trimmed;
+  const highPriority = q.priority >= 3 || URGENT_WORDS.test(trimmed);
+
+  if (q.isRecurring) {
+    const source = q.dueString ?? trimmed;
+    let label = "Weekly";
+    let rrule = "RRULE:FREQ=WEEKLY";
+    for (const pat of RECURRING_PATTERNS) {
+      if (pat.re.test(source)) {
+        label = pat.label;
+        rrule = pat.rrule;
+        break;
+      }
+    }
+    const dayMatch = source.match(SPECIFIC_WEEKDAY_RE);
+    if (dayMatch) {
+      const key = dayMatch[1].toLowerCase();
+      const wd = WEEKDAY_CODES[key];
+      if (wd) {
+        rrule = `RRULE:FREQ=WEEKLY;BYDAY=${wd.code}`;
+        label = `Weekly (${wd.label.slice(0, 3)})`;
+      }
+    }
+
+    const hasExplicitTime = !!q.dueDatetime;
+    let eventDate: string;
+    let startTime: string | undefined;
+    let endTime: string | undefined;
+    if (hasExplicitTime && q.dueDatetime) {
+      const start = utcIsoToAppTzParts(q.dueDatetime);
+      const endMs = new Date(q.dueDatetime).getTime() + DEFAULT_RECURRING_DURATION_MIN * 60 * 1000;
+      const end = utcIsoToAppTzParts(new Date(endMs).toISOString());
+      eventDate = start.date;
+      startTime = start.time;
+      endTime = end.time;
+    } else {
+      eventDate = q.dueDate ?? fmtDate(now);
+    }
+
+    return {
+      type: "Recurring",
+      rrule,
+      cadenceLabel: label,
+      eventDate,
+      startTime,
+      endTime,
+      category,
+      hasExplicitTime,
+      cleanTitle,
+    };
+  }
+
+  if (q.dueDatetime) {
+    const start = utcIsoToAppTzParts(q.dueDatetime);
+    const endMs = new Date(q.dueDatetime).getTime() + 30 * 60 * 1000;
+    const end = utcIsoToAppTzParts(new Date(endMs).toISOString());
+    return {
+      type: "Event",
+      eventDate: start.date,
+      startTime: start.time,
+      endTime: end.time,
+      location: null,
+      category,
+      cleanTitle,
+    };
+  }
+
+  if (q.dueDate) {
+    return {
+      type: "Task",
+      dueDate: q.dueDate,
+      priority: highPriority ? "High" : "Medium",
+      category,
+      cleanTitle,
+    };
+  }
+
+  // Todoist found no due date at all. It has no concept of a "Note" —
+  // every Quick Add becomes a task in Todoist regardless — so this is the
+  // one bucket decision the local heuristic still has to make.
+  if (ACTION_VERBS.test(trimmed) || /\bneed to\b|\bremember to\b|\btodo\b/i.test(trimmed)) {
+    return {
+      type: "Task",
+      dueDate: null,
+      priority: highPriority ? "High" : "Medium",
+      category,
+      cleanTitle,
+    };
+  }
+  return { type: "Note", category, cleanTitle };
 }

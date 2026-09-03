@@ -1,14 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import stage1 from "@/assets/dino/stage1.png";
-import stage2 from "@/assets/dino/stage2.png";
-import stage3 from "@/assets/dino/stage3.png";
-import stage4 from "@/assets/dino/stage4.png";
-import stage5 from "@/assets/dino/stage5.png";
-import stage1Blink from "@/assets/dino/stage1_blink.png";
-import stage2Blink from "@/assets/dino/stage2_blink.png";
-import stage3Blink from "@/assets/dino/stage3_blink.png";
-import stage4Blink from "@/assets/dino/stage4_blink.png";
-import stage5Blink from "@/assets/dino/stage5_blink.png";
+import { COMPANION_REGISTRY, type CompanionId } from "@/data/companions";
 import fieldBg from "@/assets/backgrounds/field.jpg";
 import forestBg from "@/assets/backgrounds/forest.jpg";
 import beachBg from "@/assets/backgrounds/beach.jpg";
@@ -16,16 +8,9 @@ import volcanoBg from "@/assets/backgrounds/volcano.jpg";
 import { Progress } from "@/components/ui/progress";
 import { Card, CardContent } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Badge } from "@/components/ui/badge";
-import { Drumstick, Frown } from "lucide-react";
+import { Heart, Flame } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AnimatedCompanion } from "@/components/AnimatedCompanion";
-
-export interface HungerInfo {
-  level: "fed" | "peckish" | "hungry";
-  daysSinceActivity: number | null;
-  message: string;
-}
 
 export interface PlayerState {
   level: number;
@@ -36,7 +21,14 @@ export interface PlayerState {
   stageName: string;
   levelRange: string;
   coins?: number;
-  hunger?: HungerInfo;
+}
+
+export interface CheckinInfo {
+  checkedInToday: boolean;
+  streak: number;
+  health: number;
+  tasksCompletedToday?: number;
+  dailyTaskGoal?: number;
 }
 
 export interface EquippedItem {
@@ -45,22 +37,6 @@ export interface EquippedItem {
   emoji: string;
   skill: string;
 }
-
-const STAGE_IMAGES: Record<number, string> = {
-  1: stage1,
-  2: stage2,
-  3: stage3,
-  4: stage4,
-  5: stage5,
-};
-
-const STAGE_BLINK_IMAGES: Record<number, string> = {
-  1: stage1Blink,
-  2: stage2Blink,
-  3: stage3Blink,
-  4: stage4Blink,
-  5: stage5Blink,
-};
 
 export const BACKGROUND_SCENES: Record<string, { label: string; src: string }> = {
   field: { label: "Field", src: fieldBg },
@@ -90,21 +66,27 @@ export function sceneForStage(stage: number): string {
   return "volcano";
 }
 
-const COMPANION_NAME = "Mossback";
 const BLINK_INTERVAL_MS = 4000;
 const BLINK_DURATION_MS = 1400;
 
 export function DinoCompanion({
   player,
+  companionId = "mossback",
   backgroundScene,
+  checkin,
   equippedItems,
   children,
+  onImageClick,
 }: {
   player?: PlayerState;
+  companionId?: CompanionId;
   backgroundScene?: string;
+  checkin?: CheckinInfo;
   equippedItems?: EquippedItem[];
   children?: ReactNode;
+  onImageClick?: () => void;
 }) {
+  const companion = COMPANION_REGISTRY[companionId] ?? COMPANION_REGISTRY.mossback;
   const [blinking, setBlinking] = useState(false);
 
   useEffect(() => {
@@ -132,7 +114,7 @@ export function DinoCompanion({
   const pct = Math.min(100, Math.round((player.xpIntoLevel / player.xpToNextLevel) * 100));
   const scene = backgroundScene && backgroundScene !== "auto" ? backgroundScene : sceneForStage(player.stage);
   const sceneSrc = BACKGROUND_SCENES[scene]?.src ?? BACKGROUND_SCENES.field.src;
-  const activeImg = blinking ? STAGE_BLINK_IMAGES[player.stage] : STAGE_IMAGES[player.stage];
+  const activeImg = blinking ? companion.blinkImages[player.stage] : companion.images[player.stage];
 
   return (
     <Card className="border-card-border overflow-hidden">
@@ -155,40 +137,60 @@ export function DinoCompanion({
             {player.xpIntoLevel}/{player.xpToNextLevel} XP
           </span>
         </div>
-        {player.hunger && player.hunger.level !== "fed" && (
-          <Badge
-            variant="outline"
-            className={cn(
-              "absolute top-3 right-3 gap-1 shadow-sm",
-              player.hunger.level === "hungry"
-                ? "border-destructive bg-destructive text-destructive-foreground"
-                : "border-amber-600 bg-amber-500 text-white",
-            )}
-            data-testid="badge-hunger"
+        {checkin && (
+          <div
+            className="absolute top-3 right-3 flex flex-col items-end gap-1 rounded-xl bg-background/75 backdrop-blur px-2.5 py-1.5 shadow-sm min-w-[84px]"
+            data-testid="hud-health"
           >
-            {player.hunger.level === "hungry" ? (
-              <Frown className="h-3 w-3" />
-            ) : (
-              <Drumstick className="h-3 w-3" />
+            <span className="flex items-center gap-1 text-[10px] font-semibold leading-none">
+              <Heart
+                className={cn(
+                  "h-3 w-3",
+                  checkin.health <= 25 ? "text-destructive" : "text-rose-500",
+                )}
+                fill="currentColor"
+              />
+              Health
+            </span>
+            <Progress
+              value={checkin.health}
+              className={cn("h-1.5 w-16", checkin.health <= 25 && "[&>div]:bg-destructive")}
+              data-testid="progress-health"
+            />
+            {checkin.streak > 0 && (
+              <span className="flex items-center gap-0.5 text-[9px] text-muted-foreground leading-none">
+                <Flame className="h-2.5 w-2.5 text-amber-500" />
+                {checkin.streak} day streak
+              </span>
             )}
-            {player.hunger.level === "hungry" ? "Hungry" : "Peckish"}
-          </Badge>
+            {typeof checkin.tasksCompletedToday === "number" && typeof checkin.dailyTaskGoal === "number" && (
+              <span
+                className="text-[9px] text-muted-foreground leading-none"
+                data-testid="text-task-goal-progress"
+              >
+                {checkin.tasksCompletedToday}/{checkin.dailyTaskGoal} tasks today
+              </span>
+            )}
+          </div>
         )}
         <AnimatedCompanion
           src={activeImg ?? stage1}
-          alt={`${COMPANION_NAME} the dinosaur companion, ${player.stageName} stage`}
+          alt={`${companion.name} the ${companion.species.toLowerCase()} companion, ${player.stageName} stage`}
           className="relative"
           imgClassName={cn(
             "h-36 w-36 object-contain drop-shadow-md select-none transition-all animate-dino-breathe motion-reduce:animate-none",
-            player.hunger?.level === "hungry" && "saturate-[0.35] opacity-80",
-            player.hunger?.level === "peckish" && "saturate-75",
+            checkin && checkin.health <= 25 && "saturate-[0.35] opacity-80",
+            checkin && checkin.health > 25 && checkin.health <= 60 && "saturate-75",
+            onImageClick && "cursor-pointer hover:scale-105 hover:drop-shadow-lg active:scale-95",
           )}
           testId="img-dino-companion"
           draggable={false}
+          onClick={onImageClick}
+          title={onImageClick ? "Tap to start a focus session" : undefined}
         />
         <div className="relative text-center">
           <p className="font-display font-semibold text-lg" data-testid="text-companion-level">
-            {COMPANION_NAME} · Lv. {player.level}
+            {companion.name} · Lv. {player.level}
           </p>
           <p className="text-xs text-muted-foreground" data-testid="text-companion-stage">
             {player.stageName} · {player.levelRange}
@@ -206,19 +208,6 @@ export function DinoCompanion({
                 </span>
               ))}
             </div>
-          )}
-          {player.hunger && player.hunger.level !== "fed" && (
-            <p
-              className={cn(
-                "text-xs mt-1.5 inline-block rounded-full px-2.5 py-0.5 font-medium",
-                player.hunger.level === "hungry"
-                  ? "bg-destructive text-destructive-foreground"
-                  : "bg-amber-500 text-white",
-              )}
-              data-testid="text-hunger-message"
-            >
-              {player.hunger.message}
-            </p>
           )}
         </div>
         {children && <div className="relative w-full mt-1">{children}</div>}

@@ -10,10 +10,12 @@ import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import Tasks from "@/pages/tasks";
 import Events from "@/pages/events";
-import Routine from "@/pages/routine";
 import Notes from "@/pages/notes";
 import Settings from "@/pages/settings";
 import Shop from "@/pages/shop";
+import Feed from "@/pages/feed";
+import Companions from "@/pages/companions";
+import Focus from "@/pages/focus";
 
 function AppRouter() {
   return (
@@ -22,9 +24,11 @@ function AppRouter() {
       <Route path="/" component={Home} />
       <Route path="/tasks" component={Tasks} />
       <Route path="/events" component={Events} />
-      <Route path="/routine" component={Routine} />
       <Route path="/notes" component={Notes} />
       <Route path="/shop" component={Shop} />
+      <Route path="/feed" component={Feed} />
+      <Route path="/companions" component={Companions} />
+      <Route path="/focus" component={Focus} />
       <Route path="/settings" component={Settings} />
       <Route component={NotFound} />
     </Switch>
