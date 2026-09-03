@@ -6,7 +6,11 @@
 // fixed XP_RULES lookup awardXp() uses for other sources.
 
 import { appendRow, TABS } from "./sheets.js";
-import { computeFocusXp, type FocusXpInput } from "@shared/focusXp";
+// Relative import, not the "@shared/*" alias: that alias is resolved by Vite
+// (client) and by tsx (local dev), but Vercel's serverless function builder
+// for api/index.ts doesn't reliably resolve it, which crashed every /api
+// route in production (this file is imported unconditionally by routes.ts).
+import { computeFocusXp, type FocusXpInput } from "../../shared/focusXp.js";
 import { awardCustomXp, type AwardResult } from "./gamification.js";
 
 export interface LogFocusSessionInput extends FocusXpInput {
