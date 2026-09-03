@@ -122,14 +122,14 @@ architecture regardless of tooling. Preserve this pattern for any new feature.
 | `📥 Inbox (Capture Here)` | 933608995 | raw capture entries |
 | `🦖 Player` | 1032015355 | XP/level state |
 | `✨ XP Ledger` | 526104886 | XP event log |
-| `✅ Tasks` | 867128066 | task, category, dueDate, priority, status, source, dateAdded, project, **todoistId (column I header still needs to be added manually — code reads/writes it positionally, so it works either way, but the human-readable header isn't there yet as of this writing)** |
+| `✅ Tasks` | 867128066 | task, category, dueDate, priority, status, source, dateAdded, project, todoistId |
 | `📅 Events` | 789610167 | Event Title, Date, Start Time, End Time, Location, Calendar Event Link, Source, Date Added, Event ID |
 | `🔁 Daily Routine` | 1954310944 | Time Block, Activity, Days, Type, Auto-add to Calendar?, Notes, Last Completed |
 | `📝 Notes & Journal` | 1681059438 | notes/journal entries |
 | `⚙️ Automation Log` | 780391650 | automation/system log |
 | `How To Use` | 1621244951 | user-facing help text |
 | `🛍️ Shop` | 35901387 | shop items |
-| `⏱️ Focus Log` | *(not yet created)* | timestamp, durationMinutes, completed, taskRow, taskText, xpAwarded — needs to be added manually before focus-session logging will work; registered in code as `TABS.FOCUS_LOG` in `server/lib/sheets.ts` |
+| `⏱️ Focus Log` | *(see `TABS.FOCUS_LOG` in `server/lib/sheets.ts`)* | timestamp, durationMinutes, completed, taskRow, taskText, xpAwarded |
 
 ## Integrations
 
@@ -271,10 +271,24 @@ redesign to Tasks/Events/Routine/Notes/Shop. Only Home was actually mocked up
 and approved — don't assume it generalizes to list-heavy screens without
 checking first.
 
-## Outstanding manual steps (Sheet edits, can't be done by an AI without
-direct Sheets access)
+## Sheet structure setup
 
-1. Add a `⏱️ Focus Log` tab (see Sheet tabs table above for columns).
-2. Add a `todoistId` header to cell I1 of the `✅ Tasks` tab (code already
-   reads/writes that column positionally, so this is cosmetic/for-humans
-   only, but worth doing for clarity).
+`scripts/setup-sheet.ts` creates/verifies the pieces of Sheet structure the
+app expects but can't create for itself at request time (Sheets tab creation
+is a `batchUpdate` structural call, not something the app's normal
+get/append/update/clear helpers in `server/lib/sheets.ts` do): the `⏱️ Focus
+Log` tab (with its header row) and the `todoistId` header on the `✅ Tasks`
+tab. Run it with `npx tsx scripts/setup-sheet.ts` (needs
+`GOOGLE_SERVICE_ACCOUNT_KEY` in the environment, same as the server — reads
+`.env` automatically). It's idempotent — safe to run again any time, e.g.
+after rebuilding the Sheet from scratch, or just to confirm structure is
+correct. Already run once against the live Sheet; both pieces exist there
+now.
+
+Note for future "can Claude just edit the Sheet directly" questions: this
+script is why the answer is yes for anything the Sheets API supports — it
+reuses the same service-account credentials the running app uses, just
+called directly from a one-off script instead of through an HTTP route. It's
+a different thing from browser automation (an AI clicking around a
+logged-in Google Sheets tab in an actual browser) — no browser involved
+here, just a direct API call.

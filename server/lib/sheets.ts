@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { getSheetsClient } from "./google-auth.js";
 
-const SPREADSHEET_ID = "18VEXw4UYNqPza7jGoUzgRDGBxHtxlHtZqf-YjpwLErY";
+export const SPREADSHEET_ID = "18VEXw4UYNqPza7jGoUzgRDGBxHtxlHtZqf-YjpwLErY";
 
 // Two auth paths:
 // 1. GOOGLE_SERVICE_ACCOUNT_KEY set (production/Vercel) -> googleapis client
