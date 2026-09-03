@@ -40,7 +40,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { useXpPopup, type XpAward } from "@/components/XpPopup";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import { CheckSquare, ChevronDown, Plus, FolderOpen, MoreVertical, Repeat } from "lucide-react";
+import { CheckSquare, ChevronDown, Plus, FolderOpen, MoreVertical, Repeat, RefreshCw, Link2 } from "lucide-react";
 
 interface Task {
   row: number;
@@ -52,6 +52,14 @@ interface Task {
   source: string;
   dateAdded: string;
   project: string;
+  todoistId?: string;
+}
+
+interface TodoistSyncResult {
+  ok: boolean;
+  pulled: { row: number; change: string }[];
+  pushed: { row: number; todoistId: string }[];
+  errors: { row: number; message: string }[];
 }
 
 const FILTERS = ["Active", "Completed", "All"] as const;
@@ -112,6 +120,17 @@ function TaskRow({
               Recurring
             </Badge>
           )}
+          {t.todoistId && (
+            <Badge
+              variant="outline"
+              className="gap-1 text-muted-foreground"
+              data-testid={`badge-todoist-${t.row}`}
+              title="Linked to Todoist"
+            >
+              <Link2 className="h-3 w-3" />
+              Todoist
+            </Badge>
+          )}
           {t.dueDate && (
             <Badge variant={overdue ? "destructive" : "outline"}>
               {overdue ? "Overdue: " : "Due "}
@@ -160,6 +179,40 @@ function useTaskToggle() {
   });
 }
 
+function useTodoistSync() {
+  const qc = useQueryClient();
+  const { toast } = useToast();
+  return useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/todoist/sync", {});
+      return res.json() as Promise<TodoistSyncResult>;
+    },
+    onSuccess: (data) => {
+      qc.invalidateQueries({ queryKey: ["/api/tasks"] });
+      const pulledCount = data.pulled?.length ?? 0;
+      const pushedCount = data.pushed?.length ?? 0;
+      const errorCount = data.errors?.length ?? 0;
+      if (errorCount > 0) {
+        toast({
+          title: "Sync finished with errors",
+          description: `${pulledCount} pulled, ${pushedCount} pushed, ${errorCount} error(s)`,
+          variant: "destructive",
+        });
+      } else if (pulledCount === 0 && pushedCount === 0) {
+        toast({ title: "Already up to date", description: "Nothing to sync with Todoist" });
+      } else {
+        toast({
+          title: "Synced with Todoist",
+          description: `${pulledCount} updated from Todoist, ${pushedCount} pushed to Todoist`,
+        });
+      }
+    },
+    onError: (err: any) => {
+      toast({ title: "Sync failed", description: err?.message, variant: "destructive" });
+    },
+  });
+}
+
 export default function Tasks() {
   const [filter, setFilter] = useState<Filter>("Active");
   const [addOpen, setAddOpen] = useState(false);
@@ -183,6 +236,7 @@ export default function Tasks() {
   const { data, isLoading, isError } = useQuery<Task[]>({ queryKey: ["/api/tasks"] });
 
   const toggle = useTaskToggle();
+  const todoistSync = useTodoistSync();
 
   const createTask = useMutation({
     mutationFn: async () => {
@@ -324,73 +378,86 @@ export default function Tasks() {
             </Button>
           ))}
         </div>
-        <Dialog open={addOpen} onOpenChange={setAddOpen}>
-          <DialogTrigger asChild>
-            <Button size="icon" className="rounded-full shrink-0" data-testid="button-add-task">
-              <Plus className="h-4 w-4" />
-            </Button>
-          </DialogTrigger>
-          <DialogContent data-testid="dialog-add-task">
-            <DialogHeader>
-              <DialogTitle>Add a task</DialogTitle>
-            </DialogHeader>
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="new-task-text">Task</Label>
-                <Input
-                  id="new-task-text"
-                  value={newTask}
-                  onChange={(e) => setNewTask(e.target.value)}
-                  placeholder="Clean the fish tank glass"
-                  data-testid="input-new-task"
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="new-task-project">Project (optional)</Label>
-                <ProjectCombobox
-                  value={newProject}
-                  onChange={setNewProject}
-                  options={existingProjects}
-                  placeholder="General"
-                  testId="input-new-task-project"
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-3">
+        <div className="flex items-center gap-2">
+          <Button
+            size="icon"
+            variant="outline"
+            className="rounded-full shrink-0"
+            onClick={() => todoistSync.mutate()}
+            disabled={todoistSync.isPending}
+            data-testid="button-sync-todoist"
+            title="Sync with Todoist"
+          >
+            <RefreshCw className={cn("h-4 w-4", todoistSync.isPending && "animate-spin")} />
+          </Button>
+          <Dialog open={addOpen} onOpenChange={setAddOpen}>
+            <DialogTrigger asChild>
+              <Button size="icon" className="rounded-full shrink-0" data-testid="button-add-task">
+                <Plus className="h-4 w-4" />
+              </Button>
+            </DialogTrigger>
+            <DialogContent data-testid="dialog-add-task">
+              <DialogHeader>
+                <DialogTitle>Add a task</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3">
                 <div className="space-y-1.5">
-                  <Label htmlFor="new-task-due">Due date (optional)</Label>
+                  <Label htmlFor="new-task-text">Task</Label>
                   <Input
-                    id="new-task-due"
-                    type="date"
-                    value={newDueDate}
-                    onChange={(e) => setNewDueDate(e.target.value)}
-                    data-testid="input-new-task-due"
+                    id="new-task-text"
+                    value={newTask}
+                    onChange={(e) => setNewTask(e.target.value)}
+                    placeholder="Clean the fish tank glass"
+                    data-testid="input-new-task"
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Priority</Label>
-                  <Select value={newPriority} onValueChange={setNewPriority}>
-                    <SelectTrigger data-testid="select-new-task-priority">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="Medium">Normal</SelectItem>
-                      <SelectItem value="High">High</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label htmlFor="new-task-project">Project (optional)</Label>
+                  <ProjectCombobox
+                    value={newProject}
+                    onChange={setNewProject}
+                    options={existingProjects}
+                    placeholder="General"
+                    testId="input-new-task-project"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="new-task-due">Due date (optional)</Label>
+                    <Input
+                      id="new-task-due"
+                      type="date"
+                      value={newDueDate}
+                      onChange={(e) => setNewDueDate(e.target.value)}
+                      data-testid="input-new-task-due"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Priority</Label>
+                    <Select value={newPriority} onValueChange={setNewPriority}>
+                      <SelectTrigger data-testid="select-new-task-priority">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Medium">Normal</SelectItem>
+                        <SelectItem value="High">High</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
               </div>
-            </div>
-            <DialogFooter>
-              <Button
-                onClick={() => createTask.mutate()}
-                disabled={!newTask.trim() || createTask.isPending}
-                data-testid="button-save-new-task"
-              >
-                Add task
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
+              <DialogFooter>
+                <Button
+                  onClick={() => createTask.mutate()}
+                  disabled={!newTask.trim() || createTask.isPending}
+                  data-testid="button-save-new-task"
+                >
+                  Add task
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
       </div>
 
       {isLoading && (

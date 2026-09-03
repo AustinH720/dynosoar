@@ -2,9 +2,12 @@ import type { Express } from "express";
 import type { Server } from "node:http";
 import { getValues, appendRow, updateRow, clearRange, TABS, getSettings, updateSettings, normalizeTime } from "./lib/sheets.js";
 import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./lib/external.js";
-import { classify, extractProject } from "./lib/classify.js";
+import { classify, classifyFromTodoist, classifyTodoistFailure, extractProject } from "./lib/classify.js";
 import { toIsoWithTz, todayStr, todayWeekday, nowInAppTz } from "./lib/time.js";
 import { findRecentDuplicate } from "./lib/dedupe.js";
+import { quickAddTask, closeTask, reopenTask, isTodoistConfigured } from "./lib/todoist.js";
+import { runFullSync, type SheetTaskRow } from "./lib/todoist-sync.js";
+import { logFocusSession } from "./lib/focus.js";
 import {
   awardXp,
   getPlayerState,
@@ -57,10 +60,10 @@ async function mirrorTaskDueDateToCalendar(taskText: string, dueDate: string, to
     const endDate = new Date(2000, 0, 1, h, m + TASK_DUE_REMINDER_DURATION_MIN);
     const endTime = `${String(endDate.getHours()).padStart(2, "0")}:${String(endDate.getMinutes()).padStart(2, "0")}`;
     const endIso = toIsoWithTz(dueDate, endTime);
-    const title = `\ud83d\udcdd Due: ${taskText}`;
+    const title = `📝 Due: ${taskText}`;
     const calResult = await createCalendarEvent({
       title,
-      description: `Task reminder added via DynoSOAR.\n\nThis task is due today \u2014 check it off on the Tasks page once it's done.\n\nOriginal entry: "${taskText}"`,
+      description: `Task reminder added via DynoSOAR.\n\nThis task is due today — check it off on the Tasks page once it's done.\n\nOriginal entry: "${taskText}"`,
       start_date_time: startIso,
       end_date_time: endIso,
     });
@@ -83,6 +86,34 @@ async function mirrorTaskDueDateToCalendar(taskText: string, dueDate: string, to
   }
 }
 
+// ---------- Todoist sync helpers (wire todoist-sync.ts's injectable deps to the real Sheet) ----------
+
+async function readAllTaskRows(): Promise<SheetTaskRow[]> {
+  const values = await getValues(TABS.TASKS, "A2:I2000");
+  return rowsToObjects(values, 2)
+    .filter((r) => r.cells[0])
+    .map((r) => ({
+      row: r.row,
+      task: r.cells[0] ?? "",
+      category: r.cells[1] ?? "",
+      dueDate: r.cells[2] ?? "",
+      priority: r.cells[3] ?? "Medium",
+      status: r.cells[4] ?? "Not Started",
+      source: r.cells[5] ?? "",
+      dateAdded: r.cells[6] ?? "",
+      project: r.cells[7] ?? "",
+      todoistId: r.cells[8] ?? "",
+    }));
+}
+
+async function writeTaskStatus(row: number, status: string): Promise<void> {
+  await updateRow(TABS.TASKS, `E${row}`, [status]);
+}
+
+async function writeTaskTodoistId(row: number, todoistId: string): Promise<void> {
+  await updateRow(TABS.TASKS, `I${row}`, [todoistId]);
+}
+
 export async function registerRoutes(
   httpServer: Server,
   app: Express,
@@ -101,8 +132,8 @@ export async function registerRoutes(
 
       // ---- Completion detection: "completed the CFA practice set", "done with laundry" ----
       if (isCompletionPhrase(text)) {
-        const taskValues = await getValues(TABS.TASKS, "A2:H2000");
-        const openTasks: (OpenTask & { category?: string; project?: string })[] = rowsToObjects(taskValues, 2)
+        const taskValues = await getValues(TABS.TASKS, "A2:I2000");
+        const openTasks: (OpenTask & { category?: string; project?: string; todoistId?: string })[] = rowsToObjects(taskValues, 2)
           .filter((r) => r.cells[0])
           .map((r) => ({
             row: r.row,
@@ -110,6 +141,7 @@ export async function registerRoutes(
             status: r.cells[4] ?? "Not Started",
             category: r.cells[1] ?? "",
             project: r.cells[7] ?? "",
+            todoistId: r.cells[8] ?? "",
           }));
         const match = findBestTaskMatch(text, openTasks);
 
@@ -118,6 +150,13 @@ export async function registerRoutes(
         if (match) {
           await updateRow(TABS.TASKS, `E${match.row}`, ["Completed"]);
           const matchedTask = openTasks.find((t) => t.row === match.row);
+          if (matchedTask?.todoistId) {
+            try {
+              await closeTask(matchedTask.todoistId);
+            } catch (e: any) {
+              console.error("Todoist close (via completion phrase) failed:", e?.message);
+            }
+          }
           xpResult = await awardXp(
             "task_completed",
             `Completed via Home: "${match.task}"`,
@@ -197,7 +236,25 @@ export async function registerRoutes(
       }
 
       const { project, rest } = extractProject(text);
-      const c = classify(rest, now);
+
+      // ---- Todoist-first classification ----
+      // Send the (project-stripped) capture text to Todoist's Quick Add so
+      // its own NLP decides dates/times/recurrence/#project/@label/p1-p4
+      // syntax. classifyFromTodoist() maps the result onto DynoSOAR's
+      // Task/Event/Recurring/Note buckets. If the Quick Add call itself
+      // fails (network error, Todoist outage, timeout), classifyTodoistFailure()
+      // saves a plain no-date Task flagged for manual fix rather than
+      // blocking the capture or silently reverting to full local parsing.
+      let c: ReturnType<typeof classify>;
+      let todoistFailed = false;
+      try {
+        const todoistResult = await quickAddTask(project ? rest : text);
+        c = classifyFromTodoist(todoistResult, project ? rest : text, now);
+      } catch (e: any) {
+        console.error("Todoist Quick Add failed, falling back to manual-fix Task:", e?.message);
+        c = classifyTodoistFailure(project ? rest : text);
+        todoistFailed = true;
+      }
 
       // A project-tagged entry with no clear date/action defaults to a Task
       // (e.g. "Fish: water change" reads as a Note otherwise).
@@ -222,7 +279,7 @@ export async function registerRoutes(
       }
 
       let summary = "";
-      let detail: Record<string, any> = { type: c.type };
+      let detail: Record<string, any> = { type: c.type, todoistFallback: c.todoistFallback ?? false };
 
       if (c.type === "Event") {
         const startIso = toIsoWithTz(c.eventDate!, c.startTime!);
@@ -270,14 +327,18 @@ export async function registerRoutes(
           "App capture",
           today,
           project ?? "",
+          c.todoistId ?? "",
         ]);
         let calendarLink = "";
         if (c.dueDate) {
           calendarLink = await mirrorTaskDueDateToCalendar(taskText, c.dueDate, today);
         }
         summary = c.dueDate
-          ? `Task added, due ${c.dueDate} (${c.priority} priority)${calendarLink ? " \u2014 also added to your calendar" : ""}`
+          ? `Task added, due ${c.dueDate} (${c.priority} priority)${calendarLink ? " — also added to your calendar" : ""}`
           : `Task added (${c.priority} priority)`;
+        if (todoistFailed) {
+          summary += " — Todoist parsing failed, flagged for manual fix";
+        }
         detail = { ...detail, dueDate: c.dueDate, priority: c.priority, category: c.category, project, calendarLink };
       } else if (c.type === "Recurring") {
         let eventLink = "";
@@ -323,6 +384,7 @@ export async function registerRoutes(
           "App capture (recurring)",
           today,
           "🔁 Recurring",
+          c.todoistId ?? "",
         ]);
         summary = eventLink
           ? `Recurring — added to Tasks (due ${c.eventDate}) and scheduled on calendar (${c.cadenceLabel})`
@@ -361,7 +423,7 @@ export async function registerRoutes(
   // ---------- Tasks ----------
   app.get("/api/tasks", async (_req, res) => {
     try {
-      const values = await getValues(TABS.TASKS, "A2:H2000");
+      const values = await getValues(TABS.TASKS, "A2:I2000");
       const tasks = rowsToObjects(values, 2)
         .filter((r) => r.cells[0])
         .map((r) => ({
@@ -374,6 +436,7 @@ export async function registerRoutes(
           source: r.cells[5] ?? "",
           dateAdded: r.cells[6] ?? "",
           project: r.cells[7] ?? "",
+          todoistId: r.cells[8] ?? "",
         }));
       res.json(tasks);
     } catch (err: any) {
@@ -394,7 +457,9 @@ export async function registerRoutes(
         return res.status(400).json({ message: "task is required" });
       }
       const today = todayStr();
-      await appendRow(TABS.TASKS, [task, category, dueDate, priority, "Not Started", "App capture", today, project]);
+      // Tasks created directly (not through capture) have no Todoist id yet
+      // — the "Sync Todoist" button's push phase will pick them up.
+      await appendRow(TABS.TASKS, [task, category, dueDate, priority, "Not Started", "App capture", today, project, ""]);
       const calendarLink = dueDate ? await mirrorTaskDueDateToCalendar(task, dueDate, today) : "";
       const xpResult = await awardXp("task_added", task, category, project);
       await appendRow(TABS.INBOX, [
@@ -427,7 +492,7 @@ export async function registerRoutes(
         return res.status(400).json({ message: "no fields to update" });
       }
 
-      const prevValues = await getValues(TABS.TASKS, `A${row}:H${row}`);
+      const prevValues = await getValues(TABS.TASKS, `A${row}:I${row}`);
       const prev = prevValues[0] ?? [];
       const taskText = hasField("task") ? (body.task ?? "").toString().trim() || prev[0] || "" : prev[0] ?? "";
       const taskCategory = hasField("category")
@@ -439,13 +504,31 @@ export async function registerRoutes(
           ? "High"
           : "Medium"
         : prev[3] ?? "Medium";
-      const nextStatus = status || prev[4] || "Not Started";
+      const prevStatus = prev[4] || "Not Started";
+      const nextStatus = status || prevStatus;
       const taskProject = prev[7] ?? "";
+      const todoistId = prev[8] ?? "";
 
       await updateRow(TABS.TASKS, `A${row}:E${row}`, [taskText, taskCategory, dueDate, priority, nextStatus]);
 
+      // Keep Todoist in sync when completion state changes here (checkbox on
+      // the Tasks page or Home's Today list). One-way: DynoSOAR -> Todoist.
+      if (todoistId && nextStatus !== prevStatus) {
+        try {
+          if (nextStatus === "Completed") {
+            await closeTask(todoistId);
+          } else if (prevStatus === "Completed") {
+            await reopenTask(todoistId);
+          }
+        } catch (e: any) {
+          console.error(`Todoist status sync failed for row ${row} (id ${todoistId}):`, e?.message);
+          // Don't fail the request — the Sheet is still the local source of
+          // truth, and the next "Sync Todoist" pull will reconcile if needed.
+        }
+      }
+
       let xpResult: Awaited<ReturnType<typeof awardXp>> | null = null;
-      if (nextStatus === "Completed" && prev[4] !== "Completed") {
+      if (nextStatus === "Completed" && prevStatus !== "Completed") {
         xpResult = await awardXp("task_completed", taskText || `Task row ${row}`, taskCategory, taskProject);
       }
 
@@ -453,6 +536,55 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error("Task update error:", err);
       res.status(500).json({ message: err.message || "Failed to update task" });
+    }
+  });
+
+  // ---------- Focus timer ----------
+  app.post("/api/focus/complete", async (req, res) => {
+    try {
+      const durationMinutes = Number(req.body?.durationMinutes);
+      const completed = req.body?.completed === true;
+      const taskRow = req.body?.taskRow ? Number(req.body.taskRow) : undefined;
+      if (!durationMinutes || durationMinutes < 0) {
+        return res.status(400).json({ message: "durationMinutes is required" });
+      }
+      let taskText: string | undefined;
+      let linkedTaskCompletedInSession = false;
+      if (taskRow) {
+        const prevValues = await getValues(TABS.TASKS, `A${taskRow}:E${taskRow}`);
+        taskText = prevValues[0]?.[0] ?? undefined;
+        linkedTaskCompletedInSession = prevValues[0]?.[4] === "Completed";
+      }
+      const result = await logFocusSession({
+        durationMinutes,
+        completed,
+        taskRow,
+        taskText,
+        linkedTaskCompletedInSession,
+      });
+      res.json({ ok: true, xp: result.xp });
+    } catch (err: any) {
+      console.error("Focus session log error:", err);
+      res.status(500).json({ message: err.message || "Failed to log focus session" });
+    }
+  });
+
+  // ---------- Todoist ----------
+  app.get("/api/todoist/status", async (_req, res) => {
+    res.json({ configured: isTodoistConfigured() });
+  });
+
+  app.post("/api/todoist/sync", async (_req, res) => {
+    try {
+      const result = await runFullSync({
+        getAllTasks: readAllTaskRows,
+        updateTaskStatus: writeTaskStatus,
+        updateTaskTodoistId: writeTaskTodoistId,
+      });
+      res.json({ ok: true, ...result });
+    } catch (err: any) {
+      console.error("Todoist sync error:", err);
+      res.status(500).json({ message: err.message || "Failed to sync with Todoist" });
     }
   });
 
@@ -854,7 +986,7 @@ export async function registerRoutes(
     try {
       const today = todayStr();
       const [taskValues, eventValues] = await Promise.all([
-        getValues(TABS.TASKS, "A2:G2000"),
+        getValues(TABS.TASKS, "A2:I2000"),
         getValues(TABS.EVENTS, "A2:H2000"),
       ]);
 

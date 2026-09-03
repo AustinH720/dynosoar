@@ -179,4 +179,8 @@ export const TABS = {
   PLAYER: "🦖 Player",
   XP_LEDGER: "✨ XP Ledger",
   SHOP: "🛍️ Shop",
+  // Focus session log — timestamp | durationMinutes | completed | taskRow | taskText | xpAwarded.
+  // Not created automatically: add this tab to the live spreadsheet (same
+  // pattern as when "Event ID" was added to Events) before focus logging works.
+  FOCUS_LOG: "⏱️ Focus Log",
 } as const;

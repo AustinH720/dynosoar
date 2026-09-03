@@ -19,6 +19,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Drumstick, Frown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AnimatedCompanion } from "@/components/AnimatedCompanion";
 
 export interface HungerInfo {
   level: "fed" | "peckish" | "hungry";
@@ -173,15 +174,16 @@ export function DinoCompanion({
             {player.hunger.level === "hungry" ? "Hungry" : "Peckish"}
           </Badge>
         )}
-        <img
+        <AnimatedCompanion
           src={activeImg ?? stage1}
           alt={`${COMPANION_NAME} the dinosaur companion, ${player.stageName} stage`}
-          className={cn(
-            "relative h-36 w-36 object-contain drop-shadow-md select-none transition-all animate-dino-breathe motion-reduce:animate-none",
+          className="relative"
+          imgClassName={cn(
+            "h-36 w-36 object-contain drop-shadow-md select-none transition-all animate-dino-breathe motion-reduce:animate-none",
             player.hunger?.level === "hungry" && "saturate-[0.35] opacity-80",
             player.hunger?.level === "peckish" && "saturate-75",
           )}
-          data-testid="img-dino-companion"
+          testId="img-dino-companion"
           draggable={false}
         />
         <div className="relative text-center">

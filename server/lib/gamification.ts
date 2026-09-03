@@ -281,6 +281,47 @@ export async function awardXp(
   };
 }
 
+/**
+ * Credits a variable, pre-computed XP amount directly to the player,
+ * bypassing the fixed XP_RULES lookup that awardXp() uses. For sources like
+ * focus sessions where the amount scales with input (minutes) rather than
+ * being a fixed per-action reward. No coins, skill XP, or hunger/activity
+ * tracking — those stay tied to actual task/routine completions.
+ */
+export async function awardCustomXp(
+  amount: number,
+  description: string,
+  category: string = "",
+): Promise<AwardResult> {
+  const before = await getPlayerState();
+  const xpAwarded = amount;
+  const newTotal = before.totalXp + xpAwarded;
+  const info = levelFromXp(newTotal);
+  const stage = stageFromLevel(info.level);
+
+  await writePlayerCore({ ...info, ...stage });
+
+  const after = await getPlayerState();
+
+  await appendRow(TABS.XP_LEDGER, [
+    new Date().toISOString(),
+    "focus_session",
+    description,
+    xpAwarded,
+    newTotal,
+    category,
+  ]);
+
+  return {
+    player: after,
+    xpAwarded,
+    coinsAwarded: 0,
+    skill: null,
+    leveledUp: after.level > before.level,
+    stageChanged: after.stage > before.stage,
+  };
+}
+
 // ---------- Shop ----------
 // Equip slots mirror how the accessory would actually sit on the companion:
 // only one item can occupy a given slot at a time, but different slots can
