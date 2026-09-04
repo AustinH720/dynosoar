@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { getValues, appendRow, updateRow, clearRange, TABS, getSettings, updateSettings, normalizeTime } from "./lib/sheets.js";
 import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./lib/external.js";
 import { classify, classifyFromTodoist, extractProject, guessCategory } from "./lib/classify.js";
+import { buildDailySchedule } from "./lib/schedule.js";
 import {
   createTodoistTask,
   completeTodoistTask,
@@ -1056,6 +1057,23 @@ export async function registerRoutes(
     } catch (err: any) {
       console.error("My Day fetch error:", err);
       res.status(500).json({ message: err.message || "Failed to load My Day" });
+    }
+  });
+
+  // Turns a raw spoken transcript into a clean, time-ordered daily schedule
+  // (used for the "processing" step between finishing speaking and the
+  // confirm screen). Read-only — doesn't touch the Sheet.
+  app.post("/api/myday/schedule", async (req, res) => {
+    try {
+      const transcript = String(req.body?.transcript ?? "").trim();
+      if (!transcript) {
+        return res.status(400).json({ message: "A transcript is required" });
+      }
+      const schedule = buildDailySchedule(transcript);
+      res.json({ schedule });
+    } catch (err: any) {
+      console.error("My Day schedule error:", err);
+      res.status(500).json({ message: err.message || "Failed to build your schedule" });
     }
   });
 

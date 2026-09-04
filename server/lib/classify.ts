@@ -107,10 +107,49 @@ function stripDateTimePhrase(text: string, matchedText: string): string {
   let result = text.replace(matchedText, " ").replace(/\s{2,}/g, " ").trim();
   // Drop a connector word left dangling at the very end or start of the
   // remaining text ("Akira movie at" -> "Akira movie", "on Dinner" -> "Dinner").
-  result = result.replace(/\s+(at|on|this|next|for)\s*$/i, "").trim();
-  result = result.replace(/^(at|on|for)\s+/i, "").trim();
+  result = result.replace(/\s+(at|on|this|next|for|around|about)\s*$/i, "").trim();
+  result = result.replace(/^(at|on|for|around|about)\s+/i, "").trim();
   result = result.replace(/\s*,\s*$/, "").replace(/^\s*,\s*/, "").trim();
   return result.length > 0 ? result : text;
+}
+
+export type SchedulePeriod = "morning" | "afternoon" | "evening";
+
+export interface ScheduleTimeInfo {
+  time: string | null; // HH:mm, 24h
+  cleanText: string;
+  period: SchedulePeriod | null;
+}
+
+function periodForHour(hour: number): SchedulePeriod {
+  if (hour < 12) return "morning";
+  if (hour < 17) return "afternoon";
+  return "evening";
+}
+
+/**
+ * Looks for an explicit clock time in a single spoken plan item (e.g. "call
+ * the dentist at 2pm") and, if found, extracts it plus a cleaned title with
+ * the time phrase removed. Powers "Plan My Day": turns a flat voice-parsed
+ * task list into a time-ordered daily schedule. Items with no explicit clock
+ * time get null time/period and stay unscheduled ("anytime").
+ */
+export function extractScheduleTime(text: string, now: Date = new Date()): ScheduleTimeInfo {
+  const trimmed = text.trim();
+  const results = chrono.parse(trimmed, now, { forwardDate: true });
+  // chrono sometimes matches a bare "am"/"pm" fragment (e.g. speech-to-text
+  // rendering "seven a m" with a stray space) as a "certain" hour, silently
+  // defaulting to the current time. Require the matched span to contain a
+  // digit so we only trust genuine clock-time references like "7am" or
+  // "2:00 pm", and leave vaguer/garbled phrases as unscheduled ("anytime").
+  const withTime = results.find((r) => r.start.isCertain("hour") && /\d/.test(r.text));
+  if (!withTime) {
+    return { time: null, cleanText: trimmed, period: null };
+  }
+  const date = withTime.start.date();
+  const time = fmtTime(date);
+  const cleanText = stripDateTimePhrase(trimmed, withTime.text);
+  return { time, cleanText, period: periodForHour(date.getHours()) };
 }
 
 export function classify(text: string, now: Date = new Date()): Classification {

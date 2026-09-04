@@ -74,6 +74,23 @@ interface MyDayItem {
   status: string;
 }
 
+type SchedulePeriod = "morning" | "afternoon" | "evening";
+
+interface ScheduleItem {
+  id: string;
+  text: string;
+  time: string | null;
+  displayTime: string | null;
+  period: SchedulePeriod | null;
+}
+
+const SCHEDULE_GROUPS: { period: SchedulePeriod | "anytime"; label: string }[] = [
+  { period: "morning", label: "Morning" },
+  { period: "afternoon", label: "Afternoon" },
+  { period: "evening", label: "Evening" },
+  { period: "anytime", label: "Anytime" },
+];
+
 interface TodayResponse {
   today: string;
   events: { row: number; title: string; date: string; startTime: string; endTime: string; location: string }[];
@@ -152,8 +169,9 @@ export default function Home() {
 
   const [micOpen, setMicOpen] = useState(false);
   const [listening, setListening] = useState(false);
+  const [processing, setProcessing] = useState(false);
   const [transcript, setTranscript] = useState("");
-  const [draftItems, setDraftItems] = useState<string[]>([]);
+  const [scheduleItems, setScheduleItems] = useState<ScheduleItem[]>([]);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const speechSupported = !!getSpeechRecognition();
 
@@ -166,8 +184,35 @@ export default function Home() {
   const resetMicDialog = () => {
     recognitionRef.current?.stop();
     setListening(false);
+    setProcessing(false);
     setTranscript("");
-    setDraftItems([]);
+    setScheduleItems([]);
+  };
+
+  // Sends the finished transcript to the server to be split into items and
+  // turned into a clean, time-ordered schedule (any explicit "at 7pm"-style
+  // times get pulled out and used to order/group the plan). Falls back to a
+  // flat, unscheduled list client-side if the request fails, so voice
+  // planning still works even if the network hiccups.
+  const processTranscript = async (text: string) => {
+    setProcessing(true);
+    try {
+      const res = await apiRequest("POST", "/api/myday/schedule", { transcript: text });
+      const data = await res.json();
+      setScheduleItems(Array.isArray(data.schedule) ? data.schedule : []);
+    } catch (err) {
+      setScheduleItems(
+        parseTranscript(text).map((t, idx) => ({
+          id: `${idx}`,
+          text: t,
+          time: null,
+          displayTime: null,
+          period: null,
+        })),
+      );
+    } finally {
+      setProcessing(false);
+    }
   };
 
   const startListening = () => {
@@ -189,7 +234,8 @@ export default function Home() {
         .map((r: any) => r[0].transcript)
         .join(" ");
       setTranscript(text);
-      setDraftItems(parseTranscript(text));
+      setScheduleItems([]);
+      void processTranscript(text);
     };
     recognition.onerror = () => {
       setListening(false);
@@ -210,12 +256,12 @@ export default function Home() {
     setListening(false);
   };
 
-  const removeDraft = (idx: number) => {
-    setDraftItems((items) => items.filter((_, i) => i !== idx));
+  const removeScheduleItem = (id: string) => {
+    setScheduleItems((items) => items.filter((it) => it.id !== id));
   };
 
-  const updateDraft = (idx: number, value: string) => {
-    setDraftItems((items) => items.map((it, i) => (i === idx ? value : it)));
+  const updateScheduleItem = (id: string, value: string) => {
+    setScheduleItems((items) => items.map((it) => (it.id === id ? { ...it, text: value } : it)));
   };
 
   const confirmPlan = useMutation({
@@ -628,8 +674,8 @@ export default function Home() {
               Plan My Day
             </DialogTitle>
             <DialogDescription>
-              Tap the mic and talk through your day — "workout, finish the CFA readings, and then call the
-              dentist" — I'll split it into a checklist that lands right in Today's Plan.
+              Tap the mic and talk through your day — "workout at 7am, finish the CFA readings, and then call
+              the dentist at 2pm" — I'll turn it into a clean schedule for you to confirm.
             </DialogDescription>
           </DialogHeader>
 
@@ -641,6 +687,7 @@ export default function Home() {
                 listening && "animate-pulse bg-destructive hover:bg-destructive",
               )}
               onClick={listening ? stopListening : startListening}
+              disabled={processing}
               data-testid="button-mic"
               aria-label={listening ? "Stop recording" : "Start recording"}
             >
@@ -649,48 +696,81 @@ export default function Home() {
             <p className="text-xs text-muted-foreground">
               {listening
                 ? "Listening… tap again to stop"
-                : speechSupported
-                  ? "Tap to speak"
-                  : "Voice input works best in Chrome or Edge — type an item below instead"}
+                : processing
+                  ? "Working on it…"
+                  : speechSupported
+                    ? "Tap to speak"
+                    : "Voice input works best in Chrome or Edge — type an item below instead"}
             </p>
             {transcript && (
               <p className="text-xs italic text-muted-foreground border-t border-border pt-2 mt-1 w-full text-center" data-testid="text-transcript">
                 "{transcript}"
               </p>
             )}
+            {processing && (
+              <div
+                className="flex items-center gap-2 text-xs text-muted-foreground w-full justify-center"
+                data-testid="text-processing"
+              >
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                Turning that into a schedule…
+              </div>
+            )}
           </div>
 
-          {draftItems.length > 0 && (
-            <div className="space-y-2">
+          {!processing && scheduleItems.length > 0 && (
+            <div className="space-y-3">
               <p className="text-sm font-semibold flex items-center gap-1.5">
-                <Sparkles className="h-3.5 w-3.5" /> Review your plan
+                <Sparkles className="h-3.5 w-3.5" /> Your schedule — review & confirm
               </p>
-              {draftItems.map((item, idx) => (
-                <div key={idx} className="flex items-center gap-2" data-testid={`row-draft-${idx}`}>
-                  <Input
-                    value={item}
-                    onChange={(e) => updateDraft(idx, e.target.value)}
-                    className="flex-1"
-                    data-testid={`input-draft-${idx}`}
-                  />
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => removeDraft(idx)}
-                    data-testid={`button-remove-draft-${idx}`}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+              {SCHEDULE_GROUPS.map((group) => {
+                const itemsInGroup = scheduleItems.filter((it) => (it.period ?? "anytime") === group.period);
+                if (itemsInGroup.length === 0) return null;
+                return (
+                  <div key={group.period} className="space-y-1.5">
+                    <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                      {group.label}
+                    </p>
+                    {itemsInGroup.map((item) => (
+                      <div key={item.id} className="flex items-center gap-2" data-testid={`row-schedule-${item.id}`}>
+                        {item.displayTime && (
+                          <Badge variant="secondary" className="shrink-0 font-mono text-[11px] whitespace-nowrap">
+                            {item.displayTime}
+                          </Badge>
+                        )}
+                        <Input
+                          value={item.text}
+                          onChange={(e) => updateScheduleItem(item.id, e.target.value)}
+                          className="flex-1"
+                          data-testid={`input-schedule-${item.id}`}
+                        />
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => removeScheduleItem(item.id)}
+                          data-testid={`button-remove-schedule-${item.id}`}
+                        >
+                          <X className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
             </div>
           )}
 
           <DialogFooter>
             <Button
               className="w-full"
-              disabled={draftItems.length === 0 || confirmPlan.isPending}
-              onClick={() => confirmPlan.mutate(draftItems.filter((i) => i.trim()))}
+              disabled={scheduleItems.length === 0 || processing || confirmPlan.isPending}
+              onClick={() =>
+                confirmPlan.mutate(
+                  scheduleItems
+                    .filter((it) => it.text.trim())
+                    .map((it) => (it.displayTime ? `${it.displayTime} — ${it.text.trim()}` : it.text.trim())),
+                )
+              }
               data-testid="button-confirm-plan"
             >
               {confirmPlan.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ListChecks className="h-4 w-4" />}
